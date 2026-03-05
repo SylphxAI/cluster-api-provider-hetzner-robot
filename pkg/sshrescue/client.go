@@ -137,9 +137,10 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 }
 
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
+// Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.
 func IsReachable(ip string) bool {
 	conn, err := net.DialTimeout("tcp",
-		fmt.Sprintf("%s:%d", ip, rescueSSHPort), 5*time.Second)
+		fmt.Sprintf("%s:%d", ip, rescueSSHPort), 15*time.Second)
 	if err != nil {
 		return false
 	}
