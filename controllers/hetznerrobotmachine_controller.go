@@ -72,7 +72,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
-	if util.IsPaused(cluster, hrm) {
+	if cluster.Spec.Paused {
 		logger.Info("HetznerRobotMachine or Cluster is paused")
 		return ctrl.Result{}, nil
 	}
@@ -149,7 +149,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 
 	// Run state machine
 	switch hrm.Status.ProvisioningState {
-	case infrav1.StateNone, "":
+	case infrav1.StateNone:
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverIP)

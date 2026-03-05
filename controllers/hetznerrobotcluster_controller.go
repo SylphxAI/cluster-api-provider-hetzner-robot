@@ -47,7 +47,7 @@ func (r *HetznerRobotClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
-	if util.IsPaused(cluster, hrc) {
+	if cluster.Spec.Paused {
 		logger.Info("HetznerRobotCluster or Cluster is paused")
 		return ctrl.Result{}, nil
 	}
