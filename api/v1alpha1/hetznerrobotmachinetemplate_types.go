@@ -2,7 +2,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
 // HetznerRobotMachineTemplateSpec defines the desired state of HetznerRobotMachineTemplate.
@@ -19,11 +18,7 @@ type HetznerRobotMachineTemplateResource struct {
 }
 
 // HetznerRobotMachineTemplateStatus defines the observed state of HetznerRobotMachineTemplate.
-type HetznerRobotMachineTemplateStatus struct {
-	// Capacity defines the resource capacity for this machine.
-	// +optional
-	Capacity clusterv1.ResourceTable `json:"capacity,omitempty"`
-}
+type HetznerRobotMachineTemplateStatus struct {}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

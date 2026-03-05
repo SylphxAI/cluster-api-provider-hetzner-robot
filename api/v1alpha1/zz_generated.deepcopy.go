@@ -7,6 +7,8 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
+
+
 func (in *HetznerRobotCluster) DeepCopyInto(out *HetznerRobotCluster) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
@@ -290,13 +292,6 @@ func (in *HetznerRobotMachineTemplateResource) DeepCopy() *HetznerRobotMachineTe
 
 func (in *HetznerRobotMachineTemplateStatus) DeepCopyInto(out *HetznerRobotMachineTemplateStatus) {
 	*out = *in
-	if in.Capacity != nil {
-		in, out := &in.Capacity, &out.Capacity
-		*out = make(clusterv1.ResourceTable, len(*in))
-		for key, val := range *in {
-			(*out)[key] = val.DeepCopy()
-		}
-	}
 }
 
 func (in *HetznerRobotMachineTemplateStatus) DeepCopy() *HetznerRobotMachineTemplateStatus {
