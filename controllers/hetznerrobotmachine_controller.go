@@ -241,6 +241,23 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Recovery: if Talos maintenance mode is already up (install succeeded but state wasn't saved),
+	// skip to BootingTalos state.
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos already in maintenance mode (install completed), skipping re-install", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Also recovery: if port 22 is not accessible, the node may have already rebooted
+	// from a previous install attempt. Activate rescue again and retry.
+	if !sshrescue.IsReachable(serverIP) {
+		logger.Info("Rescue SSH not reachable in InRescue state, activating rescue again", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateNone
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
 	logger.Info("Installing Talos via rescue SSH", "ip", serverIP)
 
 	// Get private key
