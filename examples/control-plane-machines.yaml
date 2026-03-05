@@ -1,0 +1,144 @@
+---
+# Control Plane Node 1 — node1 (serverID: 2920324, IP: 162.55.233.221)
+# This is the INIT node that bootstraps the cluster
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+kind: TalosConfig
+metadata:
+  name: talos-production-cp-node1
+  namespace: caphr
+spec:
+  generateType: init
+  talosVersion: v1.12.4
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotMachine
+metadata:
+  name: talos-production-cp-node1
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  serverID: 2920324
+  talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+  talosVersion: v1.12.4
+  installDisk: /dev/nvme0n1
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: talos-production-cp-node1
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  clusterName: talos-production
+  version: v1.35.2
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+      kind: TalosConfig
+      name: talos-production-cp-node1
+      namespace: caphr
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotMachine
+    name: talos-production-cp-node1
+    namespace: caphr
+
+---
+# Control Plane Node 2 — node2 (serverID: 2927556, IP: 168.119.195.121)
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+kind: TalosConfig
+metadata:
+  name: talos-production-cp-node2
+  namespace: caphr
+spec:
+  generateType: controlplane
+  talosVersion: v1.12.4
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotMachine
+metadata:
+  name: talos-production-cp-node2
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  serverID: 2927556
+  talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+  talosVersion: v1.12.4
+  installDisk: /dev/nvme0n1
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: talos-production-cp-node2
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  clusterName: talos-production
+  version: v1.35.2
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+      kind: TalosConfig
+      name: talos-production-cp-node2
+      namespace: caphr
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotMachine
+    name: talos-production-cp-node2
+    namespace: caphr
+
+---
+# Control Plane Node 4 — node4 (serverID: 2932787, IP: 91.98.183.14)
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+kind: TalosConfig
+metadata:
+  name: talos-production-cp-node4
+  namespace: caphr
+spec:
+  generateType: controlplane
+  talosVersion: v1.12.4
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotMachine
+metadata:
+  name: talos-production-cp-node4
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  serverID: 2932787
+  talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+  talosVersion: v1.12.4
+  installDisk: /dev/nvme0n1
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: talos-production-cp-node4
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    cluster.x-k8s.io/control-plane: ""
+spec:
+  clusterName: talos-production
+  version: v1.35.2
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+      kind: TalosConfig
+      name: talos-production-cp-node4
+      namespace: caphr
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotMachine
+    name: talos-production-cp-node4
+    namespace: caphr

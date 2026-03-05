@@ -1,0 +1,63 @@
+---
+# CAPHR-managed Talos cluster on Hetzner Robot bare metal
+# 3 control-plane nodes (node1/2/4) + 2 worker nodes (node3/5)
+#
+# Prerequisites:
+#   - CAPI + CAPT + CAPHR installed on management cluster
+#   - robot-credentials secret in caphr namespace
+#   - caphr-ssh-secret in caphr namespace
+#
+# Node IDs:
+#   node1: serverID=2920324, IP=162.55.233.221
+#   node2: serverID=2927556, IP=168.119.195.121
+#   node3: serverID=2932729, IP=91.98.182.116
+#   node4: serverID=2932787, IP=91.98.183.14
+#   node5: serverID=2933228, IP=142.132.203.185
+#
+# IMPORTANT: Before applying, drain each node from the current management cluster!
+# The CONTROL PLANE ENDPOINT should be an IP or LB pointing to CP nodes.
+
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: talos-production
+  namespace: caphr
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+      - 10.244.0.0/16
+    services:
+      cidrBlocks:
+      - 10.96.0.0/12
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotCluster
+    name: talos-production
+    namespace: caphr
+  # Using direct Machine objects (no TalosControlPlane) for static bare metal
+  # Uncomment below to use TalosControlPlane (requires template-based host selection)
+  # controlPlaneRef:
+  #   apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
+  #   kind: TalosControlPlane
+  #   name: talos-production-cp
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotCluster
+metadata:
+  name: talos-production
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+spec:
+  # Control plane endpoint - set to node1's IP (first CP)
+  # After HA is achieved, update to an LB IP
+  controlPlaneEndpoint:
+    host: 162.55.233.221
+    port: 6443
+  robotSecretRef:
+    name: robot-credentials
+    namespace: caphr
+  sshSecretRef:
+    name: caphr-ssh-secret
+    namespace: caphr

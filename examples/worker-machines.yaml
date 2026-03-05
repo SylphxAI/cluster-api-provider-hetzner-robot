@@ -1,0 +1,91 @@
+---
+# Worker Node 1 — node3 (serverID: 2932729, IP: 91.98.182.116)
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+kind: TalosConfig
+metadata:
+  name: talos-production-worker-node3
+  namespace: caphr
+spec:
+  generateType: worker
+  talosVersion: v1.12.4
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotMachine
+metadata:
+  name: talos-production-worker-node3
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+spec:
+  serverID: 2932729
+  talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+  talosVersion: v1.12.4
+  installDisk: /dev/nvme0n1
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: talos-production-worker-node3
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+spec:
+  clusterName: talos-production
+  version: v1.35.2
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+      kind: TalosConfig
+      name: talos-production-worker-node3
+      namespace: caphr
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotMachine
+    name: talos-production-worker-node3
+    namespace: caphr
+
+---
+# Worker Node 2 — node5 (serverID: 2933228, IP: 142.132.203.185)
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+kind: TalosConfig
+metadata:
+  name: talos-production-worker-node5
+  namespace: caphr
+spec:
+  generateType: worker
+  talosVersion: v1.12.4
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotMachine
+metadata:
+  name: talos-production-worker-node5
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+spec:
+  serverID: 2933228
+  talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+  talosVersion: v1.12.4
+  installDisk: /dev/nvme0n1
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: talos-production-worker-node5
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+spec:
+  clusterName: talos-production
+  version: v1.35.2
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
+      kind: TalosConfig
+      name: talos-production-worker-node5
+      namespace: caphr
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: HetznerRobotMachine
+    name: talos-production-worker-node5
+    namespace: caphr
