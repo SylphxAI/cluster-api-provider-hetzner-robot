@@ -1,0 +1,51 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: caphr-controller-manager
+  namespace: caphr
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: caphr-manager-role
+rules:
+# CAPHR CRDs
+- apiGroups: ["infrastructure.cluster.x-k8s.io"]
+  resources: ["hetznerrobotclusters", "hetznerrobotmachines", "hetznerrobotmachinetemplates"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["infrastructure.cluster.x-k8s.io"]
+  resources: ["hetznerrobotclusters/status", "hetznerrobotmachines/status", "hetznerrobotmachinetemplates/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["infrastructure.cluster.x-k8s.io"]
+  resources: ["hetznerrobotclusters/finalizers", "hetznerrobotmachines/finalizers"]
+  verbs: ["update"]
+# CAPI core
+- apiGroups: ["cluster.x-k8s.io"]
+  resources: ["clusters", "clusters/status", "machines", "machines/status"]
+  verbs: ["get", "list", "watch"]
+# Secrets
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+# Events
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+# Leader election
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: caphr-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: caphr-manager-role
+subjects:
+- kind: ServiceAccount
+  name: caphr-controller-manager
+  namespace: caphr

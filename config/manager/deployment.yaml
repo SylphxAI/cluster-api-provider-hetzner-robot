@@ -1,0 +1,73 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caphr-controller-manager
+  namespace: caphr
+  labels:
+    app: caphr-controller-manager
+    control-plane: controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caphr-controller-manager
+  template:
+    metadata:
+      labels:
+        app: caphr-controller-manager
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: caphr-controller-manager
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: manager
+        image: registry.sylphx.com/library/caphr:latest
+        imagePullPolicy: Always
+        command:
+        - /manager
+        args:
+        - --leader-elect=true
+        - --leader-election-namespace=caphr
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8080
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: healthz
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false  # needs /tmp for machineconfig files
+          runAsNonRoot: true
+          runAsUser: 65532
+          seccompProfile:
+            type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
