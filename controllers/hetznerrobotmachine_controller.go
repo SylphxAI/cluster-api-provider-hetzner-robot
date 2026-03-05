@@ -150,6 +150,13 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	// Run state machine
 	switch hrm.Status.ProvisioningState {
 	case infrav1.StateNone:
+		// Optimization: if Talos is already in maintenance mode (e.g. after talosctl reset),
+		// skip rescue/install and apply config directly.
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			logger.Info("Node already in Talos maintenance mode, skipping rescue/install", "ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverIP)
