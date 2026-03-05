@@ -302,3 +302,102 @@ func (in *HetznerRobotMachineTemplateStatus) DeepCopy() *HetznerRobotMachineTemp
 	in.DeepCopyInto(out)
 	return out
 }
+
+// ─── HetznerRobotHost DeepCopy (generated) ────────────────────────────────────
+
+func (in *HetznerRobotHost) DeepCopyInto(out *HetznerRobotHost) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *HetznerRobotHost) DeepCopy() *HetznerRobotHost {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHost)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHost) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotHostList) DeepCopyInto(out *HetznerRobotHostList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]HetznerRobotHost, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *HetznerRobotHostList) DeepCopy() *HetznerRobotHostList {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHostList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotHostSpec) DeepCopyInto(out *HetznerRobotHostSpec) {
+	*out = *in
+}
+
+func (in *HetznerRobotHostSpec) DeepCopy() *HetznerRobotHostSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHostStatus) DeepCopyInto(out *HetznerRobotHostStatus) {
+	*out = *in
+	if in.MachineRef != nil {
+		in, out := &in.MachineRef, &out.MachineRef
+		*out = new(MachineReference)
+		**out = **in
+	}
+}
+
+func (in *HetznerRobotHostStatus) DeepCopy() *HetznerRobotHostStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *MachineReference) DeepCopyInto(out *MachineReference) {
+	*out = *in
+}
+
+func (in *MachineReference) DeepCopy() *MachineReference {
+	if in == nil {
+		return nil
+	}
+	out := new(MachineReference)
+	in.DeepCopyInto(out)
+	return out
+}

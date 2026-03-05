@@ -3,7 +3,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -443,13 +442,7 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Wait for node to come back up after apply-config reboot
-	if !talos.IsInMaintenanceMode(ctx, serverIP) && !talos.IsK8sAPIUp(ctx, serverIP) {
-		logger.Info("Waiting for node to come back up after config apply", "ip", serverIP)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// If K8s API is already up, bootstrap already happened (joining CP)
+	// If K8s API is already up, bootstrap already happened (e.g. additional CP joining)
 	if talos.IsK8sAPIUp(ctx, serverIP) {
 		logger.Info("K8s API already up, no bootstrap needed", "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateProvisioned
@@ -458,46 +451,29 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 		return ctrl.Result{}, nil
 	}
 
-	// Get cluster talosconfig secret (CAPT stores it as <cluster-name>-talosconfig)
-	talosConfigSecret := &corev1.Secret{}
-	talosConfigSecretName := fmt.Sprintf("%s-talosconfig", cluster.Name)
-	if err := r.Get(ctx, types.NamespacedName{
-		Namespace: cluster.Namespace,
-		Name:      talosConfigSecretName,
-	}, talosConfigSecret); err != nil {
-		return ctrl.Result{}, fmt.Errorf("get talosconfig secret %s: %w", talosConfigSecretName, err)
-	}
-
-	talosConfigData, ok := talosConfigSecret.Data["talosconfig"]
-	if !ok {
-		return ctrl.Result{}, fmt.Errorf("talosconfig secret %s has no 'talosconfig' key", talosConfigSecretName)
-	}
-
-	// Write talosconfig to temp file
-	tmpFile, err := os.CreateTemp("", "talosconfig-*.yaml")
+	// Build authenticated TLS config from the actual machineconfig applied to this node.
+	// machine.ca in the machineconfig is the CA the Talos API server uses to sign its TLS cert.
+	// This is NOT the same as the CABT bundle's certs.os — CABT generates machine.ca independently.
+	machineConfigData, err := r.getBootstrapData(ctx, machine)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("create temp talosconfig: %w", err)
+		return ctrl.Result{}, fmt.Errorf("get machineconfig for TLS: %w", err)
 	}
-	defer os.Remove(tmpFile.Name()) //nolint:errcheck
-	if _, err := tmpFile.Write(talosConfigData); err != nil {
-		tmpFile.Close()
-		return ctrl.Result{}, fmt.Errorf("write talosconfig: %w", err)
-	}
-	tmpFile.Close()
 
-	logger.Info("Bootstrapping etcd on init control plane", "ip", serverIP)
+	tlsCfg, err := talos.AdminTLSConfig(machineConfigData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("generate admin TLS config from machineconfig: %w", err)
+	}
+
+	logger.Info("Bootstrapping etcd on init control plane via native gRPC", "serverIP", serverIP)
 	bootstrapCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	if err := talos.Bootstrap(bootstrapCtx, serverIP, tmpFile.Name()); err != nil {
-		// If node is in maintenance mode, bootstrap might fail because it rebooted after apply-config
-		// with the config and port 50000 is the maintenance port only before any config
-		// In that case, the node IS configured, just waiting for bootstrap signal on port 50000
-		return ctrl.Result{}, fmt.Errorf("bootstrap control plane %s: %w", serverIP, err)
+	if err := talos.Bootstrap(bootstrapCtx, serverIP, tlsCfg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("Bootstrap on %s: %w", serverIP, err)
 	}
 
-	logger.Info("Bootstrap triggered, waiting for K8s API to come up", "ip", serverIP)
-	hrm.Status.ProvisioningState = infrav1.StateBootstrapping // stay here until K8s API up
+	logger.Info("Bootstrap triggered, waiting for K8s API", "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateBootstrapping
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
