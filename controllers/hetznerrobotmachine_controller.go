@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -175,6 +176,8 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverIP)
+	case infrav1.StateBootstrapping:
+		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
 	default:
 		return ctrl.Result{}, nil
 	}
@@ -386,14 +389,89 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	providerID := fmt.Sprintf("hetzner-robot://%d", hrm.Spec.ServerID)
 	hrm.Spec.ProviderID = &providerID
 
+	// For control plane nodes, we need to bootstrap etcd (talosctl bootstrap).
+	// Workers join automatically via bootstrap token.
+	isControlPlane := machine.Labels["cluster.x-k8s.io/control-plane"] == "true"
+	if isControlPlane {
+		logger.Info("Control plane node provisioned, moving to Bootstrapping state", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Worker: ready immediately after apply-config
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
-
-	// Update cluster control plane endpoint if not set
-	_ = cluster
-
-	logger.Info("Machine provisioned successfully", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+	logger.Info("Worker machine provisioned successfully", "serverID", hrm.Spec.ServerID, "ip", serverIP)
 	return ctrl.Result{}, nil
+}
+
+// stateBootstrap calls `talosctl bootstrap` on the init control plane to initialize etcd.
+// For joining control planes (not init), bootstrap is a no-op / returns AlreadyExists.
+func (r *HetznerRobotMachineReconciler) stateBootstrap(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	cluster *clusterv1.Cluster,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Wait for node to come back up after apply-config reboot
+	if !talos.IsInMaintenanceMode(ctx, serverIP) && !talos.IsK8sAPIUp(ctx, serverIP) {
+		logger.Info("Waiting for node to come back up after config apply", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// If K8s API is already up, bootstrap already happened (joining CP)
+	if talos.IsK8sAPIUp(ctx, serverIP) {
+		logger.Info("K8s API already up, no bootstrap needed", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateProvisioned
+		hrm.Status.Ready = true
+		logger.Info("Control plane provisioned successfully", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+		return ctrl.Result{}, nil
+	}
+
+	// Get cluster talosconfig secret (CAPT stores it as <cluster-name>-talosconfig)
+	talosConfigSecret := &corev1.Secret{}
+	talosConfigSecretName := fmt.Sprintf("%s-talosconfig", cluster.Name)
+	if err := r.Get(ctx, types.NamespacedName{
+		Namespace: cluster.Namespace,
+		Name:      talosConfigSecretName,
+	}, talosConfigSecret); err != nil {
+		return ctrl.Result{}, fmt.Errorf("get talosconfig secret %s: %w", talosConfigSecretName, err)
+	}
+
+	talosConfigData, ok := talosConfigSecret.Data["talosconfig"]
+	if !ok {
+		return ctrl.Result{}, fmt.Errorf("talosconfig secret %s has no 'talosconfig' key", talosConfigSecretName)
+	}
+
+	// Write talosconfig to temp file
+	tmpFile, err := os.CreateTemp("", "talosconfig-*.yaml")
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("create temp talosconfig: %w", err)
+	}
+	defer os.Remove(tmpFile.Name()) //nolint:errcheck
+	if _, err := tmpFile.Write(talosConfigData); err != nil {
+		tmpFile.Close()
+		return ctrl.Result{}, fmt.Errorf("write talosconfig: %w", err)
+	}
+	tmpFile.Close()
+
+	logger.Info("Bootstrapping etcd on init control plane", "ip", serverIP)
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	if err := talos.Bootstrap(bootstrapCtx, serverIP, tmpFile.Name()); err != nil {
+		// If node is in maintenance mode, bootstrap might fail because it rebooted after apply-config
+		// with the config and port 50000 is the maintenance port only before any config
+		// In that case, the node IS configured, just waiting for bootstrap signal on port 50000
+		return ctrl.Result{}, fmt.Errorf("bootstrap control plane %s: %w", serverIP, err)
+	}
+
+	logger.Info("Bootstrap triggered, waiting for K8s API to come up", "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateBootstrapping // stay here until K8s API up
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 func (r *HetznerRobotMachineReconciler) reconcileDelete(

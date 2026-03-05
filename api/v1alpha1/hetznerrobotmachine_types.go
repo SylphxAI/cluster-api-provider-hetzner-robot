@@ -11,14 +11,15 @@ const MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
 type ProvisioningState string
 
 const (
-	StateNone            ProvisioningState = ""
+	StateNone             ProvisioningState = ""
 	StateActivatingRescue ProvisioningState = "ActivatingRescue"
-	StateInRescue        ProvisioningState = "InRescue"
-	StateInstalling      ProvisioningState = "Installing"
-	StateBootingTalos    ProvisioningState = "BootingTalos"
-	StateApplyingConfig  ProvisioningState = "ApplyingConfig"
-	StateProvisioned     ProvisioningState = "Provisioned"
-	StateDeleting        ProvisioningState = "Deleting"
+	StateInRescue         ProvisioningState = "InRescue"
+	StateInstalling       ProvisioningState = "Installing"
+	StateBootingTalos     ProvisioningState = "BootingTalos"
+	StateApplyingConfig   ProvisioningState = "ApplyingConfig"
+	StateBootstrapping    ProvisioningState = "Bootstrapping"
+	StateProvisioned      ProvisioningState = "Provisioned"
+	StateDeleting         ProvisioningState = "Deleting"
 	StateError           ProvisioningState = "Error"
 )
 

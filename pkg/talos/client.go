@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -63,6 +64,45 @@ func ApplyConfig(ctx context.Context, ip string, configData []byte) error {
 		return fmt.Errorf("talosctl apply-config on %s: %w\noutput: %s", ip, err, out.String())
 	}
 	return nil
+}
+
+// Bootstrap triggers etcd initialization on an init control plane node.
+// This must be called exactly once on the first control plane after apply-config.
+// Calling it on already-bootstrapped nodes or worker nodes returns an error which is safe to ignore.
+func Bootstrap(ctx context.Context, ip string, talosConfigPath string) error {
+	talosctlBin := findTalosctl()
+	cmd := exec.CommandContext(ctx, talosctlBin,
+		"--talosconfig", talosConfigPath,
+		"--nodes", ip,
+		"bootstrap",
+	)
+
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Run(); err != nil {
+		outStr := out.String()
+		// Already bootstrapped is not a real error
+		if strings.Contains(outStr, "already bootstrapped") || strings.Contains(outStr, "AlreadyExists") {
+			return nil
+		}
+		return fmt.Errorf("talosctl bootstrap on %s: %w\noutput: %s", ip, err, outStr)
+	}
+	return nil
+}
+
+// IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.
+func IsK8sAPIUp(ctx context.Context, ip string) bool {
+	dialer := &net.Dialer{}
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(dialCtx, "tcp", fmt.Sprintf("%s:%d", ip, 6443))
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // findTalosctl locates the talosctl binary.
