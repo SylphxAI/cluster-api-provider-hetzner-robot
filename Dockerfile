@@ -10,9 +10,9 @@ RUN apk add --no-cache curl && \
     -o /usr/local/bin/talosctl && \
     chmod +x /usr/local/bin/talosctl
 
-# Download dependencies first (layer cache)
-COPY go.mod go.sum ./
-RUN go mod download
+# Download dependencies (go mod tidy generates go.sum)
+COPY go.mod ./
+RUN go mod tidy
 
 # Copy source
 COPY . .
