@@ -101,7 +101,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Handle deletion
 	if !hrm.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, hrm, hrc)
+		return r.reconcileDelete(ctx, hrm, hrc, machine)
 	}
 
 	// Add finalizer
@@ -110,7 +110,27 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	return r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
+	// Wrap reconcileNormal with retry counting → StateError on persistent failures
+	result, err := r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
+	if err != nil {
+		hrm.Status.RetryCount++
+		msg := err.Error()
+		hrm.Status.FailureMessage = &msg
+		if hrm.Status.RetryCount >= infrav1.MaxProvisioningRetries {
+			logger.Error(err, "Max retries exceeded, entering StateError",
+				"retries", hrm.Status.RetryCount, "state", hrm.Status.ProvisioningState)
+			reason := "MaxRetriesExceeded"
+			hrm.Status.FailureReason = &reason
+			hrm.Status.ProvisioningState = infrav1.StateError
+			hrm.Status.Ready = false
+			return ctrl.Result{}, nil // Stop retrying; human intervention needed
+		}
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+	// Success: reset retry counter
+	hrm.Status.RetryCount = 0
+	hrm.Status.FailureMessage = nil
+	return result, nil
 }
 
 func (r *HetznerRobotMachineReconciler) reconcileNormal(
@@ -178,6 +198,13 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateBootstrapping:
 		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
+	case infrav1.StateError:
+		// Terminal state — human intervention required.
+		// To retry, patch status.provisioningState back to "" (StateNone).
+		logger.Info("Machine in StateError, halting reconciliation",
+			"failureReason", hrm.Status.FailureReason,
+			"failureMessage", hrm.Status.FailureMessage)
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, nil
 	}
@@ -478,11 +505,40 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
 	hrc *infrav1.HetznerRobotCluster,
+	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Deleting HetznerRobotMachine", "serverID", hrm.Spec.ServerID)
+	logger.Info("Deleting HetznerRobotMachine", "serverID", hrm.Spec.ServerID, "nodeName", machine.Status.NodeRef)
 
 	hrm.Status.ProvisioningState = infrav1.StateDeleting
+
+	// CAPI Machine controller performs node drain BEFORE deleting the InfraMachine,
+	// but only if the Machine has a NodeRef and the workload cluster API is reachable.
+	// We verify drain has completed before proceeding to hardware reset.
+	if machine.Status.NodeRef != nil {
+		drainDone := false
+		for _, cond := range machine.Status.Conditions {
+			if cond.Type == clusterv1.DrainingSucceededCondition && cond.Status == "True" {
+				drainDone = true
+				break
+			}
+		}
+		if !drainDone {
+			// Check if drain timed out (CAPI sets reason=DrainError after timeout)
+			for _, cond := range machine.Status.Conditions {
+				if cond.Type == clusterv1.DrainingSucceededCondition && cond.Reason == "DrainError" {
+					logger.Info("Node drain timed out, proceeding with hardware reset anyway", "nodeName", machine.Status.NodeRef.Name)
+					drainDone = true
+					break
+				}
+			}
+		}
+		if !drainDone {
+			logger.Info("Waiting for CAPI to drain node before hardware reset", "nodeName", machine.Status.NodeRef.Name)
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
+		logger.Info("Node drain confirmed, proceeding with hardware reset", "nodeName", machine.Status.NodeRef.Name)
+	}
 
 	// Build Robot client
 	robotClient, err := r.buildRobotClient(ctx, hrc)
@@ -492,17 +548,18 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	// Power off the server gracefully - activate rescue mode so Talos doesn't have a running K8s node
-	// In production, you'd first drain the node from K8s
-	_, err = robotClient.ActivateRescue(hrm.Spec.ServerID, "")
+	// Activate rescue + hardware reset to wipe the node
+	sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
+	_, err = robotClient.ActivateRescue(hrm.Spec.ServerID, sshFingerprint)
 	if err != nil {
-		logger.Error(err, "Failed to activate rescue on delete, continuing")
+		logger.Error(err, "Failed to activate rescue on delete, resetting anyway")
 	}
 
 	if err := robotClient.ResetServer(hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
-		logger.Error(err, "Failed to reset server on delete, continuing")
+		logger.Error(err, "Failed to reset server on delete, removing finalizer anyway")
 	}
 
+	logger.Info("Server reset triggered, removing finalizer", "serverID", hrm.Spec.ServerID)
 	controllerutil.RemoveFinalizer(hrm, infrav1.MachineFinalizer)
 	return ctrl.Result{}, nil
 }

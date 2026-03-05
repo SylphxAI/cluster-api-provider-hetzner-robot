@@ -5,7 +5,12 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
-const MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
+const (
+	MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
+
+	// MaxProvisioningRetries is the maximum number of consecutive errors before entering StateError.
+	MaxProvisioningRetries = 10
+)
 
 // ProvisioningState represents the current state of the machine provisioning.
 type ProvisioningState string
@@ -70,6 +75,11 @@ type HetznerRobotMachineStatus struct {
 	// FailureMessage is a verbose string indicating why this machine failed.
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
+
+	// RetryCount tracks consecutive reconciliation errors for the current state.
+	// Reset to 0 on successful state transition. Transitions to StateError at MaxProvisioningRetries.
+	// +optional
+	RetryCount int `json:"retryCount,omitempty"`
 
 	// Conditions provides observations of the operational state.
 	// +optional

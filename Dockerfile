@@ -3,21 +3,19 @@ FROM golang:1.23-alpine AS builder
 
 WORKDIR /workspace
 
-# Install talosctl for machineconfig apply
+# Install talosctl
 ARG TALOS_VERSION=v1.12.4
 RUN apk add --no-cache curl && \
     curl -fsSL "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/talosctl-linux-amd64" \
     -o /usr/local/bin/talosctl && \
     chmod +x /usr/local/bin/talosctl
 
-# Download dependencies (go mod tidy generates go.sum)
-COPY go.mod ./
-RUN go mod tidy
+# Cache dependencies using go.sum for reproducible builds
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Copy source
+# Copy source and build
 COPY . .
-
-# Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-w -s" -o manager ./main.go
 
@@ -26,13 +24,9 @@ FROM alpine:3.21
 
 WORKDIR /
 
-# Install runtime dependencies
 RUN apk add --no-cache ca-certificates openssh-client curl
 
-# Copy talosctl
 COPY --from=builder /usr/local/bin/talosctl /usr/local/bin/talosctl
-
-# Copy controller binary
 COPY --from=builder /workspace/manager .
 
 USER 65532:65532
