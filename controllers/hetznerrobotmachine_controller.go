@@ -157,6 +157,13 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}
+		// Optimization: if rescue SSH is already open (server already in rescue mode),
+		// skip rescue activation and go straight to install.
+		if sshrescue.IsReachable(serverIP) {
+			logger.Info("Node already in rescue mode (SSH reachable), skipping rescue activation", "ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateInRescue
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverIP)
