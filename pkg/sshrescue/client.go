@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -47,7 +48,7 @@ func (c *Client) Connect() error {
 		Timeout:         connectTimeout,
 	}
 
-	addr := fmt.Sprintf("%s:%d", c.ip, rescueSSHPort)
+	addr := net.JoinHostPort(c.ip, strconv.Itoa(rescueSSHPort))
 	conn, err := net.DialTimeout("tcp", addr, connectTimeout)
 	if err != nil {
 		return fmt.Errorf("TCP connect to %s: %w", addr, err)
@@ -141,7 +142,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
 // Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.
 func IsReachable(ip string) bool {
-	return isReachableAddr(fmt.Sprintf("%s:%d", ip, rescueSSHPort), 15*time.Second)
+	return isReachableAddr(net.JoinHostPort(ip, strconv.Itoa(rescueSSHPort)), 15*time.Second)
 }
 
 // isReachableAddr checks if the given address is reachable via TCP within the timeout.

@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,7 +41,7 @@ func tcpReachable(ctx context.Context, ip string, port int) bool {
 	d := &net.Dialer{}
 	c, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	conn, err := d.DialContext(c, "tcp", fmt.Sprintf("%s:%d", ip, port))
+	conn, err := d.DialContext(c, "tcp", net.JoinHostPort(ip, strconv.Itoa(port)))
 	if err != nil {
 		return false
 	}
@@ -98,7 +99,7 @@ func Bootstrap(ctx context.Context, ip string, tlsCfg *tls.Config) error {
 
 // newInsecureConn dials Talos maintenance API (no server cert verification).
 func newInsecureConn(ctx context.Context, ip string) (*grpc.ClientConn, error) {
-	addr := fmt.Sprintf("%s:%d", ip, TalosAPIPort)
+	addr := net.JoinHostPort(ip, strconv.Itoa(TalosAPIPort))
 	return grpc.DialContext(ctx, addr, //nolint:staticcheck
 		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // maintenance mode: no CA available
@@ -108,7 +109,7 @@ func newInsecureConn(ctx context.Context, ip string) (*grpc.ClientConn, error) {
 
 // newAuthenticatedConn dials Talos machine API with mTLS (client cert + server cert verification).
 func newAuthenticatedConn(ctx context.Context, ip string, tlsCfg *tls.Config) (*grpc.ClientConn, error) {
-	addr := fmt.Sprintf("%s:%d", ip, TalosAPIPort)
+	addr := net.JoinHostPort(ip, strconv.Itoa(TalosAPIPort))
 	return grpc.DialContext(ctx, addr, //nolint:staticcheck
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 	)
