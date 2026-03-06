@@ -199,7 +199,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
-		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverIP)
+		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInRescue:
 		return r.stateInstallTalos(ctx, hrm, hrc, serverIP)
 	case infrav1.StateInstalling:
@@ -257,17 +257,36 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 }
 
 // stateCheckRescueActive waits for SSH to be available in rescue mode.
+// If rescue is no longer active (server rebooted back to normal OS), it re-activates
+// rescue and triggers another hardware reset automatically.
 func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
-	_ *infrav1.HetznerRobotCluster,
-	_ *robot.Client,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// Check Robot API: is rescue still armed?
+	rescueStatus, err := robotClient.GetRescueStatus(ctx, serverID)
+	if err != nil {
+		logger.Error(err, "Failed to get rescue status, will retry", "serverID", serverID)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	if !rescueStatus.Active {
+		// Rescue is no longer active — server must have rebooted back to its normal OS
+		// (one-time boot consumed). Re-activate and reset again.
+		logger.Info("Rescue no longer active (server rebooted out of rescue), re-activating", "serverID", serverID, "ip", serverIP)
+		hrm.Status.RetryCount++
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// Rescue is armed. Check if SSH is up yet.
 	if !sshrescue.IsReachable(serverIP) {
-		logger.Info("SSH not yet reachable in rescue mode, waiting", "ip", serverIP)
+		logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
 		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
 	}
 
