@@ -284,6 +284,14 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
+	// Fast-path: if Talos maintenance mode came up (e.g. server booted its existing OS
+	// into maintenance mode due to UEFI NVMe-first boot order), skip rescue entirely.
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos maintenance mode detected while waiting for rescue, skipping rescue/install", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
 	// Rescue is armed. Check if SSH is up yet.
 	if !sshrescue.IsReachable(serverIP) {
 		logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
