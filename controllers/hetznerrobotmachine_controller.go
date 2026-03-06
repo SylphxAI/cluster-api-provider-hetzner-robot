@@ -114,7 +114,8 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	// Wrap reconcileNormal with retry counting → StateError on persistent failures
+	// Wrap reconcileNormal with retry counting → StateError on persistent failures.
+	// Uses exponential backoff: 30s, 60s, 120s, ... capped at 5 minutes.
 	result, err := r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
 	if err != nil {
 		hrm.Status.RetryCount++
@@ -129,7 +130,14 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			hrm.Status.Ready = false
 			return ctrl.Result{}, nil // Stop retrying; human intervention needed
 		}
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		// Exponential backoff: 30s × 2^(retryCount-1), max 5 min
+		backoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
+		if backoff > 5*time.Minute {
+			backoff = 5 * time.Minute
+		}
+		logger.Info("Reconcile error, backing off before retry",
+			"error", err.Error(), "retryCount", hrm.Status.RetryCount, "backoff", backoff)
+		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
 	// Success: reset retry counter
 	hrm.Status.RetryCount = 0
@@ -208,6 +216,8 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverID, serverIP)
+	case infrav1.StateWaitingForBoot:
+		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
 	case infrav1.StateBootstrapping:
 		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
 	case infrav1.StateError:
@@ -464,20 +474,46 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
 	hrm.Spec.ProviderID = &providerID
 
-	// For control plane nodes, we need to bootstrap etcd (talosctl bootstrap).
-	// Workers join automatically via bootstrap token.
-	// NOTE: CAPI sets the control-plane label with empty value "", not "true".
-	// Always use util.IsControlPlaneMachine() which checks label presence, not value.
+	// After apply-config, Talos reboots. We must wait for it to come back before bootstrapping.
+	// Move to WaitingForBoot for both CP and workers (CP will go → Bootstrapping, worker → Provisioned).
 	if util.IsControlPlaneMachine(machine) {
-		logger.Info("Control plane node provisioned, moving to Bootstrapping state", "serverID", serverID, "ip", serverIP)
-		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		logger.Info("Config applied, waiting for Talos reboot before bootstrapping", "serverID", serverID, "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateWaitingForBoot
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
 	}
 
-	// Worker: ready immediately after apply-config
+	// Worker: also wait for reboot, then mark provisioned
+	logger.Info("Worker config applied, waiting for Talos reboot", "serverID", serverID, "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateWaitingForBoot
+	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+}
+
+// stateWaitForBoot waits for Talos to come back up in running stage after a config-apply reboot.
+func (r *HetznerRobotMachineReconciler) stateWaitForBoot(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !talos.IsUp(ctx, serverIP) {
+		logger.Info("Waiting for Talos to come up after config-apply reboot", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	logger.Info("Talos running after reboot", "ip", serverIP)
+
+	if util.IsControlPlaneMachine(machine) {
+		// CP: proceed to bootstrap etcd
+		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Worker: joins cluster automatically via bootstrap token — mark provisioned
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
-	logger.Info("Worker machine provisioned successfully", "serverID", serverID, "ip", serverIP)
+	logger.Info("Worker machine provisioned successfully after boot", "ip", serverIP)
 	return ctrl.Result{}, nil
 }
 
@@ -497,13 +533,22 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 		logger.Info("K8s API already up, no bootstrap needed", "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateProvisioned
 		hrm.Status.Ready = true
-		logger.Info("Control plane provisioned successfully", "ip", serverIP)
 		return ctrl.Result{}, nil
 	}
 
+	// Guard: if Talos API is not reachable, the node is still rebooting — wait, don't error.
+	if !talos.IsUp(ctx, serverIP) {
+		logger.Info("Talos API not yet reachable, waiting for node to finish booting", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	// Guard: if still in maintenance mode, config hasn't taken effect yet — wait.
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos still in maintenance mode, config apply not yet effective, waiting", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
 	// Build authenticated TLS config from the actual machineconfig applied to this node.
-	// machine.ca in the machineconfig is the CA the Talos API server uses to sign its TLS cert.
-	// This is NOT the same as the CABT bundle's certs.os — CABT generates machine.ca independently.
 	machineConfigData, err := r.getBootstrapData(ctx, machine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get machineconfig for TLS: %w", err)
@@ -519,12 +564,16 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 	defer cancel()
 
 	if err := talos.Bootstrap(bootstrapCtx, serverIP, tlsCfg); err != nil {
+		// Transient errors (connection refused, timeout, AlreadyExists) → requeue, don't error.
+		// These happen when: node is mid-reboot, etcd is already bootstrapped, or API is briefly unavailable.
+		if talos.IsTransientBootstrapError(err) {
+			logger.Info("Bootstrap transient error, will retry", "ip", serverIP, "error", err.Error())
+			return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("Bootstrap on %s: %w", serverIP, err)
 	}
 
-	// Bootstrap triggered successfully. Mark as Provisioned — etcd will self-start
-	// and K8s API will come up. The CAPI Machine controller checks InfraReady + BootstrapReady
-	// independently; we don't need to wait for K8s API here.
+	// Bootstrap triggered. etcd will self-start, K8s API will come up.
 	logger.Info("Bootstrap triggered successfully, marking as Provisioned", "ip", serverIP)
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true

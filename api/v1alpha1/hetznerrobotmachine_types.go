@@ -23,6 +23,7 @@ const (
 	StateInstalling       ProvisioningState = "Installing"
 	StateBootingTalos     ProvisioningState = "BootingTalos"
 	StateApplyingConfig   ProvisioningState = "ApplyingConfig"
+	StateWaitingForBoot   ProvisioningState = "WaitingForBoot" // waiting for Talos reboot after config apply
 	StateBootstrapping    ProvisioningState = "Bootstrapping"
 	StateProvisioned      ProvisioningState = "Provisioned"
 	StateDeleting         ProvisioningState = "Deleting"

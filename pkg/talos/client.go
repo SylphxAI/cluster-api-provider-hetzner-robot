@@ -27,9 +27,30 @@ const (
 
 // ─── Connectivity checks ──────────────────────────────────────────────────────
 
-// IsInMaintenanceMode checks TCP reachability on port 50000.
-func IsInMaintenanceMode(ctx context.Context, ip string) bool {
+// IsUp checks if the Talos API port (50000) is reachable.
+// Returns true for both maintenance mode and running mode.
+func IsUp(ctx context.Context, ip string) bool {
 	return tcpReachable(ctx, ip, TalosAPIPort)
+}
+
+// IsInMaintenanceMode checks if Talos is in maintenance mode (port 50000 open,
+// TLS handshake succeeds without client certificate — maintenance endpoint is unauthed).
+// Returns false if Talos is in running mode (requires client cert) or unreachable.
+func IsInMaintenanceMode(ctx context.Context, ip string) bool {
+	dialer := &net.Dialer{}
+	connCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := tls.DialWithDialer(dialer, "tcp",
+		net.JoinHostPort(ip, strconv.Itoa(TalosAPIPort)),
+		&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for maintenance check
+	)
+	if err != nil {
+		// "certificate required" → running mode (not maintenance)
+		// other errors → unreachable
+		return false
+	}
+	conn.Close()
+	return true // Connected without client cert → maintenance mode
 }
 
 // IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.
@@ -125,4 +146,24 @@ func isAlreadyBootstrapped(err error) bool {
 	return strings.Contains(s, "already bootstrapped") ||
 		strings.Contains(s, "AlreadyExists") ||
 		strings.Contains(s, "etcd is already running")
+}
+
+// IsTransientBootstrapError returns true for errors that are expected during
+// node startup and should be retried with a backoff rather than counted as failures.
+// This includes: connection refused, TLS handshake errors (node still booting),
+// deadline exceeded, and gRPC Unavailable.
+func IsTransientBootstrapError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "EOF") ||
+		strings.Contains(s, "deadline exceeded") ||
+		strings.Contains(s, "Unavailable") ||
+		strings.Contains(s, "transport:") ||
+		strings.Contains(s, "tls:") ||
+		strings.Contains(s, "certificate required") ||
+		strings.Contains(s, "i/o timeout")
 }
