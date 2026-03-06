@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
@@ -17,6 +18,7 @@ type ProvisioningState string
 
 const (
 	StateNone             ProvisioningState = ""
+	StateClaimHost        ProvisioningState = "ClaimHost"
 	StateActivatingRescue ProvisioningState = "ActivatingRescue"
 	StateInRescue         ProvisioningState = "InRescue"
 	StateInstalling       ProvisioningState = "Installing"
@@ -25,7 +27,7 @@ const (
 	StateBootstrapping    ProvisioningState = "Bootstrapping"
 	StateProvisioned      ProvisioningState = "Provisioned"
 	StateDeleting         ProvisioningState = "Deleting"
-	StateError           ProvisioningState = "Error"
+	StateError            ProvisioningState = "Error"
 )
 
 // HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
@@ -35,9 +37,15 @@ type HetznerRobotMachineSpec struct {
 	// +optional
 	ProviderID *string `json:"providerID,omitempty"`
 
-	// ServerID is the Hetzner Robot server ID.
-	// Find it in the Robot dashboard or via the Robot API.
-	ServerID int `json:"serverID"`
+	// HostRef is a direct reference to a specific HetznerRobotHost by name.
+	// Mutually exclusive with HostSelector. Use this for static per-server assignments.
+	// +optional
+	HostRef *corev1.LocalObjectReference `json:"hostRef,omitempty"`
+
+	// HostSelector selects an Available HetznerRobotHost by label.
+	// Mutually exclusive with HostRef. Use this for dynamic pool claiming.
+	// +optional
+	HostSelector *metav1.LabelSelector `json:"hostSelector,omitempty"`
 
 	// TalosSchematic is the Talos factory schematic ID (with extensions).
 	// Example: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
@@ -68,6 +76,11 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	ProvisioningState ProvisioningState `json:"provisioningState,omitempty"`
 
+	// HostRef tracks which HetznerRobotHost was claimed by this machine.
+	// Set by the controller during ClaimHost state.
+	// +optional
+	HostRef string `json:"hostRef,omitempty"`
+
 	// FailureReason is a brief string indicating why this machine failed.
 	// +optional
 	FailureReason *string `json:"failureReason,omitempty"`
@@ -92,7 +105,7 @@ type HetznerRobotMachineStatus struct {
 // +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".metadata.labels.cluster\\.x-k8s\\.io/cluster-name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.ready"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.provisioningState"
-// +kubebuilder:printcolumn:name="ServerID",type="integer",JSONPath=".spec.serverID"
+// +kubebuilder:printcolumn:name="Host",type="string",JSONPath=".status.hostRef"
 
 // HetznerRobotMachine is the Schema for the hetznerrobotmachines API.
 type HetznerRobotMachine struct {

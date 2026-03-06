@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -152,19 +153,21 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 
 	// Build Robot API client
+	// Resolve HetznerRobotHost (claim if needed) to get serverID + serverIP.
+	// Server info comes from the HRH, not from hrm.Spec directly.
+	hrh, err := r.resolveHost(ctx, hrm)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, fmt.Errorf("resolve host: %w", err)
+	}
+
 	robotClient, err := r.buildRobotClient(ctx, hrc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
 	}
 
-	// Get server info
-	serverInfo, err := robotClient.GetServer(ctx, hrm.Spec.ServerID)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get server %d: %w", hrm.Spec.ServerID, err)
-	}
-
-	serverIP := serverInfo.ServerIP
-	logger.Info("Reconciling machine", "serverID", hrm.Spec.ServerID, "ip", serverIP, "state", hrm.Status.ProvisioningState)
+	serverID := hrh.Spec.ServerID
+	serverIP := hrh.Spec.ServerIP
+	logger.Info("Reconciling machine", "serverID", serverID, "ip", serverIP, "state", hrm.Status.ProvisioningState)
 
 	// Set addresses
 	hrm.Status.Addresses = []clusterv1.MachineAddress{
@@ -188,7 +191,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 			hrm.Status.ProvisioningState = infrav1.StateInRescue
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}
-		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverIP)
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverIP)
 	case infrav1.StateInRescue:
@@ -198,7 +201,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
-		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverIP)
+		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverID, serverIP)
 	case infrav1.StateBootstrapping:
 		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
 	case infrav1.StateError:
@@ -219,10 +222,11 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	hrm *infrav1.HetznerRobotMachine,
 	hrc *infrav1.HetznerRobotCluster,
 	robotClient *robot.Client,
+	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Activating rescue mode", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+	logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP)
 
 	// Get SSH key fingerprint for rescue auth
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
@@ -231,18 +235,18 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	}
 
 	// Activate rescue mode
-	_, err = robotClient.ActivateRescue(ctx, hrm.Spec.ServerID, sshFingerprint)
+	_, err = robotClient.ActivateRescue(ctx, serverID, sshFingerprint)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", hrm.Spec.ServerID, err)
+		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", serverID, err)
 	}
 
 	// Hardware reset to boot into rescue
-	if err := robotClient.ResetServer(ctx, hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", hrm.Spec.ServerID, err)
+	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", serverID, err)
 	}
 
 	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
-	logger.Info("Rescue activated, server resetting", "serverID", hrm.Spec.ServerID)
+	logger.Info("Rescue activated, server resetting", "serverID", serverID)
 	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil // Give it time to reset + boot rescue
 }
 
@@ -399,6 +403,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	machine *clusterv1.Machine,
 	cluster *clusterv1.Cluster,
 	hrc *infrav1.HetznerRobotCluster,
+	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -420,7 +425,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	}
 
 	// Set the providerID
-	providerID := fmt.Sprintf("hetzner-robot://%d", hrm.Spec.ServerID)
+	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
 	hrm.Spec.ProviderID = &providerID
 
 	// For control plane nodes, we need to bootstrap etcd (talosctl bootstrap).
@@ -428,7 +433,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	// NOTE: CAPI sets the control-plane label with empty value "", not "true".
 	// Always use util.IsControlPlaneMachine() which checks label presence, not value.
 	if util.IsControlPlaneMachine(machine) {
-		logger.Info("Control plane node provisioned, moving to Bootstrapping state", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+		logger.Info("Control plane node provisioned, moving to Bootstrapping state", "serverID", serverID, "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -436,7 +441,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	// Worker: ready immediately after apply-config
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
-	logger.Info("Worker machine provisioned successfully", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+	logger.Info("Worker machine provisioned successfully", "serverID", serverID, "ip", serverIP)
 	return ctrl.Result{}, nil
 }
 
@@ -456,7 +461,7 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 		logger.Info("K8s API already up, no bootstrap needed", "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateProvisioned
 		hrm.Status.Ready = true
-		logger.Info("Control plane provisioned successfully", "serverID", hrm.Spec.ServerID, "ip", serverIP)
+		logger.Info("Control plane provisioned successfully", "ip", serverIP)
 		return ctrl.Result{}, nil
 	}
 
@@ -493,9 +498,18 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Deleting HetznerRobotMachine", "serverID", hrm.Spec.ServerID, "nodeName", machine.Status.NodeRef)
-
 	hrm.Status.ProvisioningState = infrav1.StateDeleting
+
+	// Resolve the claimed host to get serverID for hardware reset.
+	// Best-effort: if host can't be resolved, log and proceed to remove finalizer.
+	hrh, resolveErr := r.resolveHost(ctx, hrm)
+	serverID := 0
+	if resolveErr != nil {
+		logger.Error(resolveErr, "Failed to resolve host during delete, will skip hardware reset")
+	} else {
+		serverID = hrh.Spec.ServerID
+	}
+	logger.Info("Deleting HetznerRobotMachine", "serverID", serverID, "nodeName", machine.Status.NodeRef)
 
 	// CAPI Machine controller performs node drain BEFORE deleting the InfraMachine,
 	// but only if the Machine has a NodeRef and the workload cluster API is reachable.
@@ -533,18 +547,20 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	// Activate rescue + hardware reset to wipe the node
-	sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
-	_, err = robotClient.ActivateRescue(ctx, hrm.Spec.ServerID, sshFingerprint)
-	if err != nil {
-		logger.Error(err, "Failed to activate rescue on delete, resetting anyway")
+	// Activate rescue + hardware reset to wipe the node.
+	// Skip if serverID could not be resolved (best-effort deletion).
+	if serverID != 0 {
+		sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
+		if _, err := robotClient.ActivateRescue(ctx, serverID, sshFingerprint); err != nil {
+			logger.Error(err, "Failed to activate rescue on delete, resetting anyway")
+		}
+		if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
+			logger.Error(err, "Failed to reset server on delete, removing finalizer anyway")
+		}
+		logger.Info("Server reset triggered, removing finalizer", "serverID", serverID)
+	} else {
+		logger.Info("Skipping hardware reset (serverID unknown), removing finalizer")
 	}
-
-	if err := robotClient.ResetServer(ctx, hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
-		logger.Error(err, "Failed to reset server on delete, removing finalizer anyway")
-	}
-
-	logger.Info("Server reset triggered, removing finalizer", "serverID", hrm.Spec.ServerID)
 	controllerutil.RemoveFinalizer(hrm, infrav1.MachineFinalizer)
 	return ctrl.Result{}, nil
 }
@@ -612,6 +628,77 @@ func (r *HetznerRobotMachineReconciler) getSSHKeyFingerprint(ctx context.Context
 		return "", fmt.Errorf("get SSH secret: %w", err)
 	}
 	return string(secret.Data["ssh-fingerprint"]), nil
+}
+
+// resolveHost finds (and claims if needed) the HetznerRobotHost for this machine.
+// Uses hrm.Status.HostRef if already claimed; otherwise claims via Spec.HostRef or Spec.HostSelector.
+// Sets hrm.Status.HostRef and HRH.Status.MachineRef + State=Claimed on first call.
+func (r *HetznerRobotMachineReconciler) resolveHost(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+) (*infrav1.HetznerRobotHost, error) {
+	logger := log.FromContext(ctx)
+
+	// Already claimed — just fetch it.
+	if hrm.Status.HostRef != "" {
+		hrh := &infrav1.HetznerRobotHost{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, hrh); err != nil {
+			return nil, fmt.Errorf("get claimed host %s: %w", hrm.Status.HostRef, err)
+		}
+		return hrh, nil
+	}
+
+	// Find the HRH to claim.
+	var candidateName string
+	if hrm.Spec.HostRef != nil && hrm.Spec.HostRef.Name != "" {
+		// Direct reference — claim by name.
+		candidateName = hrm.Spec.HostRef.Name
+	} else if hrm.Spec.HostSelector != nil {
+		// Label selector — find an Available HRH.
+		selector, err := metav1.LabelSelectorAsSelector(hrm.Spec.HostSelector)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hostSelector: %w", err)
+		}
+		list := &infrav1.HetznerRobotHostList{}
+		if err := r.List(ctx, list, client.InNamespace(hrm.Namespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+			return nil, fmt.Errorf("list hosts by selector: %w", err)
+		}
+		for _, h := range list.Items {
+			if h.Status.State == infrav1.HostStateAvailable {
+				candidateName = h.Name
+				break
+			}
+		}
+		if candidateName == "" {
+			return nil, fmt.Errorf("no Available HetznerRobotHost found matching selector")
+		}
+	} else {
+		return nil, fmt.Errorf("HetznerRobotMachine must specify either spec.hostRef or spec.hostSelector")
+	}
+
+	// Fetch + claim the candidate host.
+	hrh := &infrav1.HetznerRobotHost{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: candidateName}, hrh); err != nil {
+		return nil, fmt.Errorf("get candidate host %s: %w", candidateName, err)
+	}
+	if hrh.Status.State != infrav1.HostStateAvailable {
+		return nil, fmt.Errorf("host %s is not Available (state=%s)", candidateName, hrh.Status.State)
+	}
+
+	// Claim: update HRH status.
+	hrh.Status.State = infrav1.HostStateClaimed
+	hrh.Status.MachineRef = &infrav1.MachineReference{
+		Name:      hrm.Name,
+		Namespace: hrm.Namespace,
+	}
+	if err := r.Status().Update(ctx, hrh); err != nil {
+		return nil, fmt.Errorf("claim host %s (update HRH status): %w", candidateName, err)
+	}
+
+	// Record in HRM status.
+	hrm.Status.HostRef = candidateName
+	logger.Info("Claimed HetznerRobotHost", "host", candidateName, "serverID", hrh.Spec.ServerID)
+	return hrh, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
