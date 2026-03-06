@@ -2,6 +2,7 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,33 +45,33 @@ type ServerInfo struct {
 
 // RescueInfo contains information about the rescue system.
 type RescueInfo struct {
-	ServerIP         string `json:"server_ip"`
-	ServerNumber     int    `json:"server_number"`
-	OS               string `json:"os"`
-	Arch             int    `json:"arch"`
-	Active           bool   `json:"active"`
-	Password         string `json:"password"`
-	AuthorizedKeys   []interface{} `json:"authorized_key"`
-	HostKey          []interface{} `json:"host_key"`
+	ServerIP       string `json:"server_ip"`
+	ServerNumber   int    `json:"server_number"`
+	OS             string `json:"os"`
+	Arch           int    `json:"arch"`
+	Active         bool   `json:"active"`
+	Password       string `json:"password"`
+	AuthorizedKeys []any  `json:"authorized_key"`
+	HostKey        []any  `json:"host_key"`
 }
 
 // GetServer returns information about a server by its ID.
-func (c *Client) GetServer(serverID int) (*ServerInfo, error) {
+func (c *Client) GetServer(ctx context.Context, serverID int) (*ServerInfo, error) {
 	var result struct {
 		Server ServerInfo `json:"server"`
 	}
-	if err := c.get(fmt.Sprintf("/server/%d", serverID), &result); err != nil {
+	if err := c.get(ctx, fmt.Sprintf("/server/%d", serverID), &result); err != nil {
 		return nil, err
 	}
 	return &result.Server, nil
 }
 
 // GetServerByIP returns information about a server by its IP.
-func (c *Client) GetServerByIP(ip string) (*ServerInfo, error) {
+func (c *Client) GetServerByIP(ctx context.Context, ip string) (*ServerInfo, error) {
 	var result struct {
 		Server ServerInfo `json:"server"`
 	}
-	if err := c.get(fmt.Sprintf("/server/%s", ip), &result); err != nil {
+	if err := c.get(ctx, fmt.Sprintf("/server/%s", ip), &result); err != nil {
 		return nil, err
 	}
 	return &result.Server, nil
@@ -78,7 +79,7 @@ func (c *Client) GetServerByIP(ip string) (*ServerInfo, error) {
 
 // ActivateRescue activates rescue mode for a server.
 // Returns the rescue password.
-func (c *Client) ActivateRescue(serverID int, sshKeyFingerprint string) (*RescueInfo, error) {
+func (c *Client) ActivateRescue(ctx context.Context, serverID int, sshKeyFingerprint string) (*RescueInfo, error) {
 	data := url.Values{}
 	data.Set("os", "linux")
 	data.Set("arch", "64")
@@ -89,26 +90,26 @@ func (c *Client) ActivateRescue(serverID int, sshKeyFingerprint string) (*Rescue
 	var result struct {
 		Rescue RescueInfo `json:"rescue"`
 	}
-	if err := c.post(fmt.Sprintf("/boot/%d/rescue", serverID), data, &result); err != nil {
+	if err := c.post(ctx, fmt.Sprintf("/boot/%d/rescue", serverID), data, &result); err != nil {
 		return nil, fmt.Errorf("activate rescue: %w", err)
 	}
 	return &result.Rescue, nil
 }
 
 // GetRescueStatus returns the current rescue mode status.
-func (c *Client) GetRescueStatus(serverID int) (*RescueInfo, error) {
+func (c *Client) GetRescueStatus(ctx context.Context, serverID int) (*RescueInfo, error) {
 	var result struct {
 		Rescue RescueInfo `json:"rescue"`
 	}
-	if err := c.get(fmt.Sprintf("/boot/%d/rescue", serverID), &result); err != nil {
+	if err := c.get(ctx, fmt.Sprintf("/boot/%d/rescue", serverID), &result); err != nil {
 		return nil, err
 	}
 	return &result.Rescue, nil
 }
 
 // DeactivateRescue deactivates rescue mode.
-func (c *Client) DeactivateRescue(serverID int) error {
-	req, err := http.NewRequest(http.MethodDelete,
+func (c *Client) DeactivateRescue(ctx context.Context, serverID int) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
 		fmt.Sprintf("%s/boot/%d/rescue", robotBaseURL, serverID), nil)
 	if err != nil {
 		return err
@@ -136,27 +137,27 @@ const (
 )
 
 // ResetServer sends a reset/reboot signal to the server.
-func (c *Client) ResetServer(serverID int, resetType ResetType) error {
+func (c *Client) ResetServer(ctx context.Context, serverID int, resetType ResetType) error {
 	data := url.Values{}
 	data.Set("type", string(resetType))
-	var result interface{}
-	if err := c.post(fmt.Sprintf("/reset/%d", serverID), data, &result); err != nil {
+	var result any
+	if err := c.post(ctx, fmt.Sprintf("/reset/%d", serverID), data, &result); err != nil {
 		return fmt.Errorf("reset server %d: %w", serverID, err)
 	}
 	return nil
 }
 
 // SetServerName updates the name of a server in Robot.
-func (c *Client) SetServerName(serverID int, name string) error {
+func (c *Client) SetServerName(ctx context.Context, serverID int, name string) error {
 	data := url.Values{}
 	data.Set("server_name", name)
-	var result interface{}
-	return c.post(fmt.Sprintf("/server/%d", serverID), data, &result)
+	var result any
+	return c.post(ctx, fmt.Sprintf("/server/%d", serverID), data, &result)
 }
 
 // get performs a GET request to the Robot API.
-func (c *Client) get(path string, result interface{}) error {
-	req, err := http.NewRequest(http.MethodGet, robotBaseURL+path, nil)
+func (c *Client) get(ctx context.Context, path string, result any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotBaseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -177,8 +178,8 @@ func (c *Client) get(path string, result interface{}) error {
 }
 
 // post performs a POST request to the Robot API.
-func (c *Client) post(path string, data url.Values, result interface{}) error {
-	req, err := http.NewRequest(http.MethodPost, robotBaseURL+path,
+func (c *Client) post(ctx context.Context, path string, data url.Values, result any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, robotBaseURL+path,
 		strings.NewReader(data.Encode()))
 	if err != nil {
 		return err

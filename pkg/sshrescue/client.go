@@ -98,10 +98,11 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
 
 	// Download and write Talos raw image
+	// Both imageURL and disk are %q-quoted to prevent shell injection
 	ddCmd := fmt.Sprintf(
 		"set -e; "+
 			"echo 'Downloading Talos image...'; "+
-			"curl -fsSL %q | xzcat | dd of=%s bs=4M status=progress; "+
+			"curl -fsSL %q | xzcat | dd of=%q bs=4M status=progress; "+
 			"sync; "+
 			"echo 'Talos image written'",
 		imageURL, disk,
@@ -114,16 +115,17 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 
 	// Set EFI boot order to disk (Hetzner UEFI uses efibootmgr)
 	// First, detect EFI boot entries for the target disk
+	// Disk path is stored in a shell variable to avoid repeated quoting issues
 	bootCmd := fmt.Sprintf(
 		"set -e; "+
-			"DISK_PART=$(ls %s* | grep -E 'p?1$' | head -1); "+
+			"TARGET_DISK=%q; "+
+			"DISK_PART=$(ls \"${TARGET_DISK}\"* | grep -E 'p?1$' | head -1); "+
 			"if [ -n \"$DISK_PART\" ] && command -v efibootmgr &>/dev/null; then "+
-			"  DISK=$(echo %s | sed 's|/dev/||'); "+
-			"  PART=$(echo $DISK_PART | sed 's|.*[^0-9]||'); "+
-			"  efibootmgr -c -d %s -p $PART -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' || true; "+
+			"  PART=$(echo \"$DISK_PART\" | sed 's|.*[^0-9]||'); "+
+			"  efibootmgr -c -d \"${TARGET_DISK}\" -p \"$PART\" -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' || true; "+
 			"fi; "+
 			"echo 'Boot order configured'",
-		disk, disk, disk,
+		disk,
 	)
 
 	out, err = c.Run(bootCmd)
@@ -148,16 +150,3 @@ func IsReachable(ip string) bool {
 	return true
 }
 
-// WaitForSSH waits until the SSH port is reachable.
-func WaitForSSH(ip string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if IsReachable(ip) {
-			// Give SSH daemon a moment to fully start
-			time.Sleep(5 * time.Second)
-			return nil
-		}
-		time.Sleep(10 * time.Second)
-	}
-	return fmt.Errorf("SSH not reachable on %s after %s", ip, timeout)
-}

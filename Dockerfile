@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /workspace
 
@@ -20,8 +20,8 @@ FROM alpine:3.21
 
 WORKDIR /
 
-# openssh-client for SSH to Hetzner rescue mode
-RUN apk add --no-cache ca-certificates openssh-client
+# SSH operations use Go's golang.org/x/crypto/ssh (no system binary needed)
+RUN apk add --no-cache ca-certificates
 
 COPY --from=builder /workspace/manager .
 

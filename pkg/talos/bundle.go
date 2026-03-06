@@ -20,22 +20,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ─── CABT bundle parsing ──────────────────────────────────────────────────────
-
-// cabtBundle mirrors the YAML structure of the CABT cluster bundle.
-// Stored in "<cluster>-talos" secret, key "bundle".
-// NOTE: The bundle's certs.os is NOT the same as machine.ca in the generated machineconfig.
-// CABT generates an independent machine.ca when creating machineconfigs.
-// Always extract machine.ca from the actual machineconfig (bootstrap-data secret).
-type cabtBundle struct {
-	Certs struct {
-		OS struct {
-			Crt string `yaml:"crt"`
-			Key string `yaml:"key"`
-		} `yaml:"os"`
-	} `yaml:"certs"`
-}
-
 // ─── Machineconfig CA extraction ─────────────────────────────────────────────
 
 // talosV1Alpha1Config is a minimal subset of the Talos v1alpha1 machineconfig,
@@ -185,5 +169,3 @@ func adminTLSConfigFromCA(caCert *x509.Certificate, caKey ed25519.PrivateKey) (*
 		MinVersion:   tls.VersionTLS12,
 	}, nil
 }
-
-

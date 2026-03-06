@@ -78,6 +78,10 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// Fetch the HetznerRobotCluster
+	if cluster.Spec.InfrastructureRef == nil {
+		logger.Info("Cluster.Spec.InfrastructureRef not set yet")
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
 	hrc := &infrav1.HetznerRobotCluster{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Namespace: cluster.Spec.InfrastructureRef.Namespace,
@@ -154,7 +158,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 
 	// Get server info
-	serverInfo, err := robotClient.GetServer(hrm.Spec.ServerID)
+	serverInfo, err := robotClient.GetServer(ctx, hrm.Spec.ServerID)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get server %d: %w", hrm.Spec.ServerID, err)
 	}
@@ -223,17 +227,17 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	// Get SSH key fingerprint for rescue auth
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
 	if err != nil {
-		logger.Error(err, "Failed to get SSH key fingerprint")
+		return ctrl.Result{}, fmt.Errorf("get SSH key fingerprint: %w", err)
 	}
 
 	// Activate rescue mode
-	_, err = robotClient.ActivateRescue(hrm.Spec.ServerID, sshFingerprint)
+	_, err = robotClient.ActivateRescue(ctx, hrm.Spec.ServerID, sshFingerprint)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", hrm.Spec.ServerID, err)
 	}
 
 	// Hardware reset to boot into rescue
-	if err := robotClient.ResetServer(hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
+	if err := robotClient.ResetServer(ctx, hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", hrm.Spec.ServerID, err)
 	}
 
@@ -343,9 +347,8 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
-	// Still waiting for reboot
+	// Still waiting for reboot — stay in StateInstalling until maintenance mode is detected
 	logger.Info("Waiting for Talos to boot (not yet in maintenance mode)", "ip", serverIP)
-	hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
 }
 
@@ -368,14 +371,19 @@ func (r *HetznerRobotMachineReconciler) stateWaitTalosMaintenanceMode(
 	logger.Info("Talos in maintenance mode, proceeding to apply config", "ip", serverIP)
 
 	// Set control plane endpoint on cluster if this is a control plane machine
-	// and endpoint is not yet set
+	// and endpoint is not yet set. Use patch helper to avoid version conflicts
+	// (r.Update would fail if the object was modified between read and write).
 	if util.IsControlPlaneMachine(machine) && hrc.Spec.ControlPlaneEndpoint.Host == "" {
+		hrcPatchHelper, patchErr := patch.NewHelper(hrc, r.Client)
+		if patchErr != nil {
+			return ctrl.Result{}, fmt.Errorf("init HRC patch helper: %w", patchErr)
+		}
 		hrc.Spec.ControlPlaneEndpoint = clusterv1.APIEndpoint{
 			Host: serverIP,
 			Port: 6443,
 		}
-		if err := r.Update(ctx, hrc); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update control plane endpoint: %w", err)
+		if patchErr = hrcPatchHelper.Patch(ctx, hrc); patchErr != nil {
+			return ctrl.Result{}, fmt.Errorf("patch control plane endpoint: %w", patchErr)
 		}
 		logger.Info("Set control plane endpoint", "host", serverIP)
 	}
@@ -417,8 +425,9 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 
 	// For control plane nodes, we need to bootstrap etcd (talosctl bootstrap).
 	// Workers join automatically via bootstrap token.
-	isControlPlane := machine.Labels["cluster.x-k8s.io/control-plane"] == "true"
-	if isControlPlane {
+	// NOTE: CAPI sets the control-plane label with empty value "", not "true".
+	// Always use util.IsControlPlaneMachine() which checks label presence, not value.
+	if util.IsControlPlaneMachine(machine) {
 		logger.Info("Control plane node provisioned, moving to Bootstrapping state", "serverID", hrm.Spec.ServerID, "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -526,12 +535,12 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 
 	// Activate rescue + hardware reset to wipe the node
 	sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
-	_, err = robotClient.ActivateRescue(hrm.Spec.ServerID, sshFingerprint)
+	_, err = robotClient.ActivateRescue(ctx, hrm.Spec.ServerID, sshFingerprint)
 	if err != nil {
 		logger.Error(err, "Failed to activate rescue on delete, resetting anyway")
 	}
 
-	if err := robotClient.ResetServer(hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
+	if err := robotClient.ResetServer(ctx, hrm.Spec.ServerID, robot.ResetTypeHardware); err != nil {
 		logger.Error(err, "Failed to reset server on delete, removing finalizer anyway")
 	}
 
