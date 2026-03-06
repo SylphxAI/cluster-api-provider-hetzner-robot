@@ -59,15 +59,18 @@ type ServerInfo struct {
 }
 
 // RescueInfo contains information about the rescue system.
+// Note: Hetzner Robot returns os/arch as arrays when rescue is inactive
+// (listing supported options) and as scalar values when rescue is active.
+// We use json.RawMessage to absorb both forms since we only care about Active.
 type RescueInfo struct {
-	ServerIP       string `json:"server_ip"`
-	ServerNumber   int    `json:"server_number"`
-	OS             string `json:"os"`
-	Arch           int    `json:"arch"`
-	Active         bool   `json:"active"`
-	Password       string `json:"password"`
-	AuthorizedKeys []any  `json:"authorized_key"`
-	HostKey        []any  `json:"host_key"`
+	ServerIP       string          `json:"server_ip"`
+	ServerNumber   int             `json:"server_number"`
+	OS             json.RawMessage `json:"os"`   // string or []string depending on state
+	Arch           json.RawMessage `json:"arch"` // int or []int depending on state
+	Active         bool            `json:"active"`
+	Password       string          `json:"password"`
+	AuthorizedKeys []any           `json:"authorized_key"`
+	HostKey        []any           `json:"host_key"`
 }
 
 // GetServer returns information about a server by its ID.
