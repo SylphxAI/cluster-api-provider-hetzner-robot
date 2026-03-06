@@ -1,0 +1,29 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosimple
+    - gocritic
+    - gofmt
+    - misspell
+
+linters-settings:
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+
+issues:
+  exclude-rules:
+    # Ignore gosec for rescue mode TLS (InsecureSkipVerify is intentional)
+    - linters: [gosec]
+      text: "G402"
+    # Ignore errcheck for Close() calls
+    - linters: [errcheck]
+      text: "Close"

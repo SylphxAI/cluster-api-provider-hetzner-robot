@@ -12,13 +12,13 @@ metadata:
 rules:
 # CAPHR CRDs
 - apiGroups: ["infrastructure.cluster.x-k8s.io"]
-  resources: ["hetznerrobotclusters", "hetznerrobotmachines", "hetznerrobotmachinetemplates"]
+  resources: ["hetznerrobotclusters", "hetznerrobotmachines", "hetznerrobotmachinetemplates", "hetznerrobothosts"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["infrastructure.cluster.x-k8s.io"]
-  resources: ["hetznerrobotclusters/status", "hetznerrobotmachines/status", "hetznerrobotmachinetemplates/status"]
+  resources: ["hetznerrobotclusters/status", "hetznerrobotmachines/status", "hetznerrobotmachinetemplates/status", "hetznerrobothosts/status"]
   verbs: ["get", "update", "patch"]
 - apiGroups: ["infrastructure.cluster.x-k8s.io"]
-  resources: ["hetznerrobotclusters/finalizers", "hetznerrobotmachines/finalizers"]
+  resources: ["hetznerrobotclusters/finalizers", "hetznerrobotmachines/finalizers", "hetznerrobothosts/finalizers"]
   verbs: ["update"]
 # CAPI core
 - apiGroups: ["cluster.x-k8s.io"]

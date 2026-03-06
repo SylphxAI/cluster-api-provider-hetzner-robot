@@ -18,6 +18,7 @@ const robotBaseURL = "https://robot-ws.your-server.de"
 type Client struct {
 	username   string
 	password   string
+	baseURL    string
 	httpClient *http.Client
 }
 
@@ -26,6 +27,20 @@ func New(username, password string) *Client {
 	return &Client{
 		username: username,
 		password: password,
+		baseURL:  robotBaseURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewWithBaseURL creates a new Robot API client with a custom base URL.
+// This is primarily useful for testing with httptest servers.
+func NewWithBaseURL(username, password, baseURL string) *Client {
+	return &Client{
+		username: username,
+		password: password,
+		baseURL:  baseURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -110,7 +125,7 @@ func (c *Client) GetRescueStatus(ctx context.Context, serverID int) (*RescueInfo
 // DeactivateRescue deactivates rescue mode.
 func (c *Client) DeactivateRescue(ctx context.Context, serverID int) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
-		fmt.Sprintf("%s/boot/%d/rescue", robotBaseURL, serverID), nil)
+		fmt.Sprintf("%s/boot/%d/rescue", c.baseURL, serverID), nil)
 	if err != nil {
 		return err
 	}
@@ -157,7 +172,7 @@ func (c *Client) SetServerName(ctx context.Context, serverID int, name string) e
 
 // get performs a GET request to the Robot API.
 func (c *Client) get(ctx context.Context, path string, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotBaseURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -179,7 +194,7 @@ func (c *Client) get(ctx context.Context, path string, result any) error {
 
 // post performs a POST request to the Robot API.
 func (c *Client) post(ctx context.Context, path string, data url.Values, result any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, robotBaseURL+path,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path,
 		strings.NewReader(data.Encode()))
 	if err != nil {
 		return err
