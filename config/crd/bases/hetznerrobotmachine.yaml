@@ -28,9 +28,9 @@ spec:
     - jsonPath: .status.provisioningState
       name: State
       type: string
-    - jsonPath: .spec.serverID
-      name: ServerID
-      type: integer
+    - jsonPath: .status.hostRef
+      name: Host
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -46,23 +46,56 @@ spec:
             description: HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
             properties:
               providerID:
-                description: ProviderID is the unique identifier for this machine.
+                description: ProviderID is the unique identifier for this machine. Set automatically by the controller.
                 type: string
-              serverID:
-                description: ServerID is the Hetzner Robot server ID.
-                type: integer
+              hostRef:
+                description: >-
+                  HostRef is a direct reference to a specific HetznerRobotHost by name.
+                  Mutually exclusive with hostSelector. Use this for static per-server assignments.
+                properties:
+                  name:
+                    description: Name of the referent.
+                    type: string
+                required:
+                - name
+                type: object
+              hostSelector:
+                description: >-
+                  HostSelector selects an Available HetznerRobotHost by label.
+                  Mutually exclusive with hostRef. Use this for dynamic pool claiming.
+                properties:
+                  matchExpressions:
+                    items:
+                      properties:
+                        key:
+                          type: string
+                        operator:
+                          type: string
+                        values:
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    type: object
+                type: object
               talosSchematic:
-                description: TalosSchematic is the Talos factory schematic ID (with extensions).
+                description: "TalosSchematic is the Talos factory schematic ID (with extensions)."
                 type: string
               talosVersion:
-                description: TalosVersion is the Talos version to install (e.g. v1.12.4).
+                description: "TalosVersion is the Talos version to install (e.g. v1.12.4)."
                 type: string
               installDisk:
-                description: InstallDisk is the disk to install Talos on. Defaults to /dev/nvme0n1
+                description: "InstallDisk is the disk to install Talos on. Defaults to /dev/nvme0n1"
                 default: "/dev/nvme0n1"
                 type: string
             required:
-            - serverID
             - talosSchematic
             - talosVersion
             type: object
@@ -86,6 +119,12 @@ spec:
               provisioningState:
                 description: ProvisioningState is the current state of provisioning.
                 type: string
+              hostRef:
+                description: HostRef tracks which HetznerRobotHost was claimed by this machine.
+                type: string
+              retryCount:
+                description: RetryCount tracks consecutive reconciliation errors.
+                type: integer
               failureReason:
                 type: string
               failureMessage:

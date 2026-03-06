@@ -266,7 +266,4 @@ func TestConstants(t *testing.T) {
 	if connectTimeout != 60*time.Second {
 		t.Errorf("expected connectTimeout=60s, got %v", connectTimeout)
 	}
-	if commandTimeout != 20*time.Minute {
-		t.Errorf("expected commandTimeout=20m, got %v", commandTimeout)
-	}
 }

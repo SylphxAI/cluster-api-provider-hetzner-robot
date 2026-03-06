@@ -3,6 +3,8 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
@@ -159,6 +161,16 @@ func (in *HetznerRobotMachineSpec) DeepCopyInto(out *HetznerRobotMachineSpec) {
 		in, out := &in.ProviderID, &out.ProviderID
 		*out = new(string)
 		**out = **in
+	}
+	if in.HostRef != nil {
+		in, out := &in.HostRef, &out.HostRef
+		*out = new(corev1.LocalObjectReference)
+		**out = **in
+	}
+	if in.HostSelector != nil {
+		in, out := &in.HostSelector, &out.HostSelector
+		*out = new(metav1.LabelSelector)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

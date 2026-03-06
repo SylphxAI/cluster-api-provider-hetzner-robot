@@ -149,6 +149,12 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	// If already provisioned, just ensure status is correct
 	if hrm.Status.ProvisioningState == infrav1.StateProvisioned {
 		hrm.Status.Ready = true
+		// Ensure HRH state is also marked Provisioned (idempotent)
+		if hrm.Status.HostRef != "" {
+			if err := r.updateHostState(ctx, hrm.Namespace, hrm.Status.HostRef, infrav1.HostStateProvisioned); err != nil {
+				logger.Error(err, "Failed to update HRH state to Provisioned")
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -157,7 +163,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	// Server info comes from the HRH, not from hrm.Spec directly.
 	hrh, err := r.resolveHost(ctx, hrm)
 	if err != nil {
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, fmt.Errorf("resolve host: %w", err)
+		return ctrl.Result{}, fmt.Errorf("resolve host: %w", err)
 	}
 
 	robotClient, err := r.buildRobotClient(ctx, hrc)
@@ -486,9 +492,13 @@ func (r *HetznerRobotMachineReconciler) stateBootstrap(
 		return ctrl.Result{}, fmt.Errorf("Bootstrap on %s: %w", serverIP, err)
 	}
 
-	logger.Info("Bootstrap triggered, waiting for K8s API", "ip", serverIP)
-	hrm.Status.ProvisioningState = infrav1.StateBootstrapping
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Bootstrap triggered successfully. Mark as Provisioned — etcd will self-start
+	// and K8s API will come up. The CAPI Machine controller checks InfraReady + BootstrapReady
+	// independently; we don't need to wait for K8s API here.
+	logger.Info("Bootstrap triggered successfully, marking as Provisioned", "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateProvisioned
+	hrm.Status.Ready = true
+	return ctrl.Result{}, nil
 }
 
 func (r *HetznerRobotMachineReconciler) reconcileDelete(
@@ -557,10 +567,20 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 		if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
 			logger.Error(err, "Failed to reset server on delete, removing finalizer anyway")
 		}
-		logger.Info("Server reset triggered, removing finalizer", "serverID", serverID)
+		logger.Info("Server reset triggered", "serverID", serverID)
 	} else {
-		logger.Info("Skipping hardware reset (serverID unknown), removing finalizer")
+		logger.Info("Skipping hardware reset (serverID unknown)")
 	}
+
+	// Release the claimed host back to Available so it can be reused.
+	if hrm.Status.HostRef != "" {
+		if err := r.releaseHost(ctx, hrm.Namespace, hrm.Status.HostRef); err != nil {
+			logger.Error(err, "Failed to release host, removing finalizer anyway", "host", hrm.Status.HostRef)
+		} else {
+			logger.Info("Released host back to Available", "host", hrm.Status.HostRef)
+		}
+	}
+
 	controllerutil.RemoveFinalizer(hrm, infrav1.MachineFinalizer)
 	return ctrl.Result{}, nil
 }
@@ -677,6 +697,9 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 	}
 
 	// Fetch + claim the candidate host.
+	// Uses patch helper for optimistic concurrency — if another HRM claims the same host
+	// between our Get and Patch, the patch will fail with a conflict error (409),
+	// preventing double-claiming. The failed HRM retries on next reconcile.
 	hrh := &infrav1.HetznerRobotHost{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: candidateName}, hrh); err != nil {
 		return nil, fmt.Errorf("get candidate host %s: %w", candidateName, err)
@@ -685,20 +708,64 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 		return nil, fmt.Errorf("host %s is not Available (state=%s)", candidateName, hrh.Status.State)
 	}
 
-	// Claim: update HRH status.
+	// Claim: use patch helper for safe concurrent updates.
+	hrhPatchHelper, err := patch.NewHelper(hrh, r.Client)
+	if err != nil {
+		return nil, fmt.Errorf("init HRH patch helper for claim: %w", err)
+	}
 	hrh.Status.State = infrav1.HostStateClaimed
 	hrh.Status.MachineRef = &infrav1.MachineReference{
 		Name:      hrm.Name,
 		Namespace: hrm.Namespace,
 	}
-	if err := r.Status().Update(ctx, hrh); err != nil {
-		return nil, fmt.Errorf("claim host %s (update HRH status): %w", candidateName, err)
+	if err := hrhPatchHelper.Patch(ctx, hrh); err != nil {
+		return nil, fmt.Errorf("claim host %s (patch HRH): %w", candidateName, err)
 	}
 
 	// Record in HRM status.
 	hrm.Status.HostRef = candidateName
 	logger.Info("Claimed HetznerRobotHost", "host", candidateName, "serverID", hrh.Spec.ServerID)
 	return hrh, nil
+}
+
+// releaseHost sets a HetznerRobotHost back to Available and clears its MachineRef.
+// Used when a HetznerRobotMachine is deleted to return the host to the pool.
+func (r *HetznerRobotMachineReconciler) releaseHost(ctx context.Context, namespace, hostName string) error {
+	hrh := &infrav1.HetznerRobotHost{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: hostName}, hrh); err != nil {
+		return fmt.Errorf("get host %s: %w", hostName, err)
+	}
+	hrhPatchHelper, err := patch.NewHelper(hrh, r.Client)
+	if err != nil {
+		return fmt.Errorf("init HRH patch helper: %w", err)
+	}
+	hrh.Status.State = infrav1.HostStateAvailable
+	hrh.Status.MachineRef = nil
+	if err := hrhPatchHelper.Patch(ctx, hrh); err != nil {
+		return fmt.Errorf("patch host %s: %w", hostName, err)
+	}
+	return nil
+}
+
+// updateHostState sets a HetznerRobotHost to the given state using patch helper
+// for safe concurrent updates. No-op if already in the target state.
+func (r *HetznerRobotMachineReconciler) updateHostState(ctx context.Context, namespace, hostName string, state infrav1.HostState) error {
+	hrh := &infrav1.HetznerRobotHost{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: hostName}, hrh); err != nil {
+		return fmt.Errorf("get host %s: %w", hostName, err)
+	}
+	if hrh.Status.State == state {
+		return nil // already in target state
+	}
+	hrhPatchHelper, err := patch.NewHelper(hrh, r.Client)
+	if err != nil {
+		return fmt.Errorf("init HRH patch helper: %w", err)
+	}
+	hrh.Status.State = state
+	if err := hrhPatchHelper.Patch(ctx, hrh); err != nil {
+		return fmt.Errorf("patch host %s state to %s: %w", hostName, state, err)
+	}
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

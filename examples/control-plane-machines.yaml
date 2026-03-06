@@ -1,6 +1,5 @@
 ---
-# Control Plane Node 1 — node1 (serverID: 2920324, IP: 162.55.233.221)
-# This is the INIT node that bootstraps the cluster
+# Control Plane Node 1 — ax162-node1 (init, bootstraps the cluster)
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -19,10 +18,10 @@ metadata:
     cluster.x-k8s.io/cluster-name: talos-production
     cluster.x-k8s.io/control-plane: ""
 spec:
-  serverID: 2920324
+  hostRef:
+    name: ax162-node1
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine
@@ -48,7 +47,7 @@ spec:
     namespace: caphr
 
 ---
-# Control Plane Node 2 — node2 (serverID: 2927556, IP: 168.119.195.121)
+# Control Plane Node 2 — ax162-node2 (joining CP)
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -67,10 +66,10 @@ metadata:
     cluster.x-k8s.io/cluster-name: talos-production
     cluster.x-k8s.io/control-plane: ""
 spec:
-  serverID: 2927556
+  hostRef:
+    name: ax162-node2
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine
@@ -96,7 +95,7 @@ spec:
     namespace: caphr
 
 ---
-# Control Plane Node 4 — node4 (serverID: 2932787, IP: 91.98.183.14)
+# Control Plane Node 4 — ax162-node4 (joining CP)
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -115,10 +114,10 @@ metadata:
     cluster.x-k8s.io/cluster-name: talos-production
     cluster.x-k8s.io/control-plane: ""
 spec:
-  serverID: 2932787
+  hostRef:
+    name: ax162-node4
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine

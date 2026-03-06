@@ -38,8 +38,38 @@ spec:
                     x-kubernetes-preserve-unknown-fields: true
                   spec:
                     properties:
-                      serverID:
-                        type: integer
+                      hostRef:
+                        description: Direct reference to a HetznerRobotHost by name.
+                        properties:
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      hostSelector:
+                        description: Label selector to claim an Available HetznerRobotHost.
+                        properties:
+                          matchExpressions:
+                            items:
+                              properties:
+                                key:
+                                  type: string
+                                operator:
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                              - key
+                              - operator
+                              type: object
+                            type: array
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            type: object
+                        type: object
                       talosSchematic:
                         type: string
                       talosVersion:
@@ -48,7 +78,6 @@ spec:
                         default: "/dev/nvme0n1"
                         type: string
                     required:
-                    - serverID
                     - talosSchematic
                     - talosVersion
                     type: object

@@ -1,5 +1,5 @@
 ---
-# Worker Node 1 — node3 (serverID: 2932729, IP: 91.98.182.116)
+# Worker Node 3 — ax162-node3
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -17,10 +17,10 @@ metadata:
   labels:
     cluster.x-k8s.io/cluster-name: talos-production
 spec:
-  serverID: 2932729
+  hostRef:
+    name: ax162-node3
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine
@@ -45,7 +45,7 @@ spec:
     namespace: caphr
 
 ---
-# Worker Node 2 — node5 (serverID: 2933228, IP: 142.132.203.185)
+# Worker Node 5 — ax162-node5
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -63,10 +63,10 @@ metadata:
   labels:
     cluster.x-k8s.io/cluster-name: talos-production
 spec:
-  serverID: 2933228
+  hostRef:
+    name: ax162-node5
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine

@@ -7,15 +7,74 @@
 #   - robot-credentials secret in caphr namespace
 #   - caphr-ssh-secret in caphr namespace
 #
-# Node IDs:
-#   node1: serverID=2920324, IP=162.55.233.221
-#   node2: serverID=2927556, IP=168.119.195.121
-#   node3: serverID=2932729, IP=91.98.182.116
-#   node4: serverID=2932787, IP=91.98.183.14
-#   node5: serverID=2933228, IP=142.132.203.185
-#
 # IMPORTANT: Before applying, drain each node from the current management cluster!
-# The CONTROL PLANE ENDPOINT should be an IP or LB pointing to CP nodes.
+
+# ─── Physical Server Inventory ───────────────────────────────────────────────
+# One HetznerRobotHost per physical server. These are permanent — never deleted
+# automatically. Machines claim hosts from this pool during provisioning.
+
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node1
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2920324
+  serverIP: "162.55.233.221"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node2
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2927556
+  serverIP: "168.119.195.121"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node3
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: worker
+spec:
+  serverID: 2932729
+  serverIP: "91.98.182.116"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node4
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2932787
+  serverIP: "91.98.183.14"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node5
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: worker
+spec:
+  serverID: 2933228
+  serverIP: "142.132.203.185"
+
+---
+# ─── Cluster Definition ──────────────────────────────────────────────────────
 
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
@@ -35,12 +94,6 @@ spec:
     kind: HetznerRobotCluster
     name: talos-production
     namespace: caphr
-  # Using direct Machine objects (no TalosControlPlane) for static bare metal
-  # Uncomment below to use TalosControlPlane (requires template-based host selection)
-  # controlPlaneRef:
-  #   apiVersion: controlplane.cluster.x-k8s.io/v1alpha3
-  #   kind: TalosControlPlane
-  #   name: talos-production-cp
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: HetznerRobotCluster
@@ -50,8 +103,8 @@ metadata:
   labels:
     cluster.x-k8s.io/cluster-name: talos-production
 spec:
-  # Control plane endpoint - set to node1's IP (first CP)
-  # After HA is achieved, update to an LB IP
+  # Control plane endpoint — set to node1's IP (first CP).
+  # After HA is achieved, update to an LB IP.
   controlPlaneEndpoint:
     host: 162.55.233.221
     port: 6443

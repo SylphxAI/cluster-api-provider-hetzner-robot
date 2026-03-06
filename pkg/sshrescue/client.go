@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	rescueSSHPort    = 22
-	connectTimeout   = 60 * time.Second
-	commandTimeout   = 20 * time.Minute // dd can take a while
+	rescueSSHPort  = 22
+	connectTimeout = 60 * time.Second
 )
 
 // Client is an SSH client for Hetzner rescue environments.

@@ -9,6 +9,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"sigs.k8s.io/cluster-api/util/patch"
+
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 )
 
@@ -37,21 +39,26 @@ func (r *HetznerRobotHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Use patch helper for safe concurrent updates (consistent with other controllers).
+	patchHelper, err := patch.NewHelper(host, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	defer func() {
+		if pErr := patchHelper.Patch(ctx, host); pErr != nil {
+			logger.Error(pErr, "Failed to patch HetznerRobotHost")
+		}
+	}()
+
 	// Add finalizer to prevent deletion while claimed
 	if !controllerutil.ContainsFinalizer(host, infrav1.HostFinalizer) {
 		controllerutil.AddFinalizer(host, infrav1.HostFinalizer)
-		if err := r.Update(ctx, host); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 
 	// Initialise State to Available if not set
 	if host.Status.State == "" {
 		host.Status.State = infrav1.HostStateAvailable
-		if err := r.Status().Update(ctx, host); err != nil {
-			return ctrl.Result{}, err
-		}
 		return ctrl.Result{}, nil
 	}
 
@@ -66,9 +73,6 @@ func (r *HetznerRobotHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		// Safe to delete
 		controllerutil.RemoveFinalizer(host, infrav1.HostFinalizer)
-		if err := r.Update(ctx, host); err != nil {
-			return ctrl.Result{}, err
-		}
 		logger.Info("HetznerRobotHost finalizer removed, deletion proceeding",
 			"serverID", host.Spec.ServerID)
 		return ctrl.Result{}, nil

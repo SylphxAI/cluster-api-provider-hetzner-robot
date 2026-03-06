@@ -18,7 +18,6 @@ type ProvisioningState string
 
 const (
 	StateNone             ProvisioningState = ""
-	StateClaimHost        ProvisioningState = "ClaimHost"
 	StateActivatingRescue ProvisioningState = "ActivatingRescue"
 	StateInRescue         ProvisioningState = "InRescue"
 	StateInstalling       ProvisioningState = "Installing"

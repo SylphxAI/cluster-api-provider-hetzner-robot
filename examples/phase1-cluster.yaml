@@ -2,9 +2,42 @@
 # CAPHR Phase 1: Provision node1 (CP init) + node3 (worker)
 # node2/4/5 remain as management cluster
 #
-# Apply: kubectl -n caphr apply -f phase1-cluster.yaml
+# Apply:
+#   kubectl -n caphr apply -f examples/phase1-cluster.yaml
 
-# 1. Cluster infrastructure definition
+# ─── Physical Server Inventory ───────────────────────────────────────────────
+# Create HetznerRobotHost objects FIRST — these represent the physical servers.
+# The HRM controller will claim them during provisioning.
+
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node1
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2920324
+  serverIP: "162.55.233.221"
+  installDisk: /dev/nvme0n1
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: ax162-node3
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: worker
+spec:
+  serverID: 2932729
+  serverIP: "91.98.182.116"
+  installDisk: /dev/nvme0n1
+
+---
+# ─── Cluster Definition ──────────────────────────────────────────────────────
+
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
 metadata:
@@ -44,7 +77,8 @@ spec:
     namespace: caphr
 
 ---
-# 2. Bootstrap config for node1 (init = creates new cluster CA + etcd)
+# ─── Control Plane Node 1 (init) ─────────────────────────────────────────────
+
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -53,9 +87,7 @@ metadata:
 spec:
   generateType: init
   talosVersion: v1.12.4
-
 ---
-# 3. Infrastructure machine for node1
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: HetznerRobotMachine
 metadata:
@@ -65,13 +97,11 @@ metadata:
     cluster.x-k8s.io/cluster-name: talos-production
     cluster.x-k8s.io/control-plane: ""
 spec:
-  serverID: 2920324
+  hostRef:
+    name: ax162-node1
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
-
 ---
-# 4. CAPI Machine for node1 (links bootstrap + infrastructure)
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine
 metadata:
@@ -96,7 +126,8 @@ spec:
     namespace: caphr
 
 ---
-# 5. Bootstrap config for node3 (worker)
+# ─── Worker Node 3 ───────────────────────────────────────────────────────────
+
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha3
 kind: TalosConfig
 metadata:
@@ -105,9 +136,7 @@ metadata:
 spec:
   generateType: worker
   talosVersion: v1.12.4
-
 ---
-# 6. Infrastructure machine for node3
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: HetznerRobotMachine
 metadata:
@@ -116,13 +145,11 @@ metadata:
   labels:
     cluster.x-k8s.io/cluster-name: talos-production
 spec:
-  serverID: 2932729
+  hostRef:
+    name: ax162-node3
   talosSchematic: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
   talosVersion: v1.12.4
-  installDisk: /dev/nvme0n1
-
 ---
-# 7. CAPI Machine for node3
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Machine
 metadata:
