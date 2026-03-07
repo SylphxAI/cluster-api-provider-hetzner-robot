@@ -1,0 +1,30 @@
+# Phase 2b: New HetznerRobotHosts for node4 + node5
+# Apply AFTER draining node4 + node5 from management cluster
+# Once applied, TCP will immediately claim these hosts and CAPHR will
+# automatically: rescue → wipe → install Talos → join production as CP
+
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: node4
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2932787
+  serverIP: "91.98.183.14"
+  installDisk: /dev/nvme0n1
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotHost
+metadata:
+  name: node5
+  namespace: caphr
+  labels:
+    cluster.x-k8s.io/cluster-name: talos-production
+    role: control-plane
+spec:
+  serverID: 2933228
+  serverIP: "142.132.203.185"
+  installDisk: /dev/nvme0n1
