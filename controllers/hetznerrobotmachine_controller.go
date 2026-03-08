@@ -122,13 +122,29 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		msg := err.Error()
 		hrm.Status.FailureMessage = &msg
 		if hrm.Status.RetryCount >= infrav1.MaxProvisioningRetries {
-			logger.Error(err, "Max retries exceeded, entering StateError",
-				"retries", hrm.Status.RetryCount, "state", hrm.Status.ProvisioningState)
-			reason := "MaxRetriesExceeded"
-			hrm.Status.FailureReason = &reason
-			hrm.Status.ProvisioningState = infrav1.StateError
-			hrm.Status.Ready = false
-			return ctrl.Result{}, nil // Stop retrying; human intervention needed
+			hrm.Status.FullResetCount++
+			if hrm.Status.FullResetCount >= infrav1.MaxFullResets {
+				// Hard failure: too many full reset cycles → human intervention needed.
+				logger.Error(err, "Max full resets exceeded, entering terminal StateError",
+					"retries", hrm.Status.RetryCount,
+					"fullResets", hrm.Status.FullResetCount,
+					"state", hrm.Status.ProvisioningState)
+				reason := "MaxFullResetsExceeded"
+				hrm.Status.FailureReason = &reason
+				hrm.Status.ProvisioningState = infrav1.StateError
+				hrm.Status.Ready = false
+				return ctrl.Result{}, nil
+			}
+			// Soft failure: trigger full node reset (rescue + wipe) and retry from StateNone.
+			// This auto-recovers from: wrong machineconfig CA, stuck installs, UEFI issues.
+			logger.Error(err, "Max retries exceeded, triggering full node reset and retry",
+				"retries", hrm.Status.RetryCount,
+				"fullResets", hrm.Status.FullResetCount,
+				"state", hrm.Status.ProvisioningState)
+			hrm.Status.RetryCount = 0
+			hrm.Status.FailureMessage = nil
+			hrm.Status.ProvisioningState = infrav1.StateNone // Restart full provisioning cycle
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		// Exponential backoff: 30s × 2^(retryCount-1), max 5 min
 		backoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
@@ -139,8 +155,9 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			"error", err.Error(), "retryCount", hrm.Status.RetryCount, "backoff", backoff)
 		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
-	// Success: reset retry counter
+	// Success: reset retry counters
 	hrm.Status.RetryCount = 0
+	hrm.Status.FullResetCount = 0
 	hrm.Status.FailureMessage = nil
 	return result, nil
 }
@@ -304,8 +321,31 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	}
 
 	if !rescueStatus.Active {
-		// Rescue inactive AND SSH closed: server rebooted back to its normal OS.
-		// Re-activate rescue and reset.
+		// Rescue inactive AND SSH closed. Could mean:
+		//   (a) Server rebooted back to normal OS (Talos is not running) → re-activate rescue
+		//   (b) Talos was successfully installed and is already running (full mode, config applied)
+		//   (c) Talos is in maintenance mode — already caught above by IsInMaintenanceMode check
+		//
+		// Distinguish (a) from (b) by checking if Talos API port is reachable.
+		// IsUp returns true even in full running mode (not just maintenance).
+		if talos.IsUp(ctx, serverIP) {
+			// Talos is running (port 50000 open). Two sub-cases:
+			if talos.IsInMaintenanceMode(ctx, serverIP) {
+				// Maintenance mode: Talos installed, waiting for machineconfig.
+				logger.Info("Talos in maintenance mode (rescue consumed after install), proceeding", "ip", serverIP)
+				hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+			} else {
+				// Full running mode: machineconfig already applied, node rebooted and joined.
+				// This can happen when CAPHR restarts and the node was already provisioned
+				// but the state wasn't saved (e.g. controller crash after ApplyConfig but before status patch).
+				logger.Info("Talos running in full mode (config already applied), advancing to WaitingForBoot", "ip", serverIP)
+				hrm.Status.ProvisioningState = infrav1.StateWaitingForBoot
+			}
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// Talos not reachable AND rescue inactive AND SSH closed:
+		// Server genuinely rebooted back to its normal OS (or is mid-POST after a previous reset).
+		// Re-activate rescue and trigger a fresh hardware reset.
 		logger.Info("Rescue no longer active and SSH closed, re-activating rescue", "serverID", serverID, "ip", serverIP)
 		hrm.Status.RetryCount++
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)

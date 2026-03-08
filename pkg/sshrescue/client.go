@@ -113,25 +113,41 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("install Talos image: %w\nOutput: %s", err, out)
 	}
 
-	// Set EFI boot order to disk (Hetzner UEFI uses efibootmgr)
-	// First, detect EFI boot entries for the target disk
-	// Disk path is stored in a shell variable to avoid repeated quoting issues
+	// Configure EFI boot order: Talos first, then PXE (so future rescue activations work).
+	// Hetzner rescue depends on PXE boot being in the boot order — if we remove it,
+	// subsequent rescue activations will boot into Talos instead of the rescue environment.
+	//
+	// Strategy:
+	//   1. Record existing boot order (includes PXE entries like "Network Boot")
+	//   2. Create a new Talos EFI entry
+	//   3. Set boot order: [Talos, ...existing entries...]
+	//      This keeps PXE in the boot order so Hetzner can intercept next boot during rescue.
 	bootCmd := fmt.Sprintf(
 		"set -e; "+
 			"TARGET_DISK=%q; "+
-			"DISK_PART=$(ls \"${TARGET_DISK}\"* | grep -E 'p?1$' | head -1); "+
-			"if [ -n \"$DISK_PART\" ] && command -v efibootmgr &>/dev/null; then "+
-			"  PART=$(echo \"$DISK_PART\" | sed 's|.*[^0-9]||'); "+
-			"  efibootmgr -c -d \"${TARGET_DISK}\" -p \"$PART\" -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' || true; "+
-			"fi; "+
-			"echo 'Boot order configured'",
+			"if ! command -v efibootmgr &>/dev/null; then echo 'efibootmgr not available, skipping EFI config'; exit 0; fi; "+
+			// Capture existing boot order (e.g. "0000 0001 0002")
+			"OLD_ORDER=$(efibootmgr | grep '^BootOrder:' | awk '{print $2}' | tr ',' ' '); "+
+			// Remove any existing 'Talos' entries to avoid duplicates
+			"for NUM in $(efibootmgr | grep -i 'talos' | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/'); do efibootmgr -b $NUM -B || true; done; "+
+			// Find the partition (e.g. nvme0n1p1 or nvme0n1p12)
+			"DISK_PART=$(ls \"${TARGET_DISK}\"* 2>/dev/null | grep -E '[0-9]+$' | sort | head -1); "+
+			"if [ -z \"$DISK_PART\" ]; then echo 'No EFI partition found, skipping'; exit 0; fi; "+
+			"PART=$(echo \"$DISK_PART\" | grep -oE '[0-9]+$'); "+
+			// Create new Talos boot entry and capture its ID
+			"NEW_ENTRY=$(efibootmgr -c -d \"${TARGET_DISK}\" -p \"$PART\" -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' | grep 'Boot[0-9A-Fa-f].*\\* Talos' | head -1 | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/'); "+
+			"if [ -z \"$NEW_ENTRY\" ]; then echo 'Could not get new entry ID, skipping order set'; exit 0; fi; "+
+			// Build new boot order: Talos first, then all existing entries (preserves PXE)
+			"NEW_ORDER=$(echo \"$NEW_ENTRY $(echo $OLD_ORDER | tr ' ' '\\n' | grep -iv \"$NEW_ENTRY\" | tr '\\n' ' ')\" | xargs | tr ' ' ','); "+
+			"efibootmgr -o \"$NEW_ORDER\"; "+
+			"echo \"EFI boot order set: $NEW_ORDER (Talos first, PXE preserved)\"",
 		disk,
 	)
 
 	out, err = c.Run(bootCmd)
 	if err != nil {
-		// Non-fatal: EFI setup might fail if efibootmgr not available
-		// The BIOS boot sector is also written by Talos installer
+		// Non-fatal: log the output but don't fail the install.
+		// BIOS boot sector is also written by Talos installer as fallback.
 		_ = out
 	}
 

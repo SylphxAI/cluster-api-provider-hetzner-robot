@@ -34,23 +34,38 @@ func IsUp(ctx context.Context, ip string) bool {
 }
 
 // IsInMaintenanceMode checks if Talos is in maintenance mode (port 50000 open,
-// TLS handshake succeeds without client certificate — maintenance endpoint is unauthed).
-// Returns false if Talos is in running mode (requires client cert) or unreachable.
+// gRPC call accepted without client certificate).
+//
+// Bug fix: TLS 1.3 completes the handshake even for full-mode Talos (which uses
+// post-handshake client auth). A plain TLS dial succeeds in BOTH modes; the
+// "certificate required" rejection only surfaces at the gRPC application layer.
+// We therefore probe with an actual (intentionally empty) ApplyConfiguration RPC:
+//   - Maintenance mode: server accepts the call and returns a validation/parse error
+//     (not "certificate required") → maintenance mode confirmed.
+//   - Full mode: server rejects at gRPC layer with "certificate required" → not maintenance.
+//   - Unreachable: dial or context error → not maintenance.
 func IsInMaintenanceMode(ctx context.Context, ip string) bool {
-	dialer := &net.Dialer{}
-	connCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	conn, err := tls.DialWithDialer(dialer, "tcp",
-		net.JoinHostPort(ip, strconv.Itoa(TalosAPIPort)),
-		&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for maintenance check
-	)
+
+	conn, err := newInsecureConn(probeCtx, ip)
 	if err != nil {
-		// "certificate required" → running mode (not maintenance)
-		// other errors → unreachable
 		return false
 	}
-	conn.Close()
-	return true // Connected without client cert → maintenance mode
+	defer conn.Close() //nolint:errcheck
+
+	client := machinepb.NewMachineServiceClient(conn)
+	// Send an intentionally empty ApplyConfiguration request.
+	// Maintenance mode returns a parse/validation error (not "certificate required").
+	// Full mode returns "certificate required" at the gRPC transport layer.
+	_, err = client.ApplyConfiguration(probeCtx, &machinepb.ApplyConfigurationRequest{})
+	if err != nil {
+		if strings.Contains(err.Error(), "certificate required") {
+			return false // full mode — server demands client cert
+		}
+		return true // any other error (e.g. validation) means server is in maintenance mode
+	}
+	return true // unexpected success — treat as maintenance mode
 }
 
 // IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.

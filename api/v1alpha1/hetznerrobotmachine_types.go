@@ -9,8 +9,13 @@ import (
 const (
 	MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
 
-	// MaxProvisioningRetries is the maximum number of consecutive errors before entering StateError.
+	// MaxProvisioningRetries is the maximum number of consecutive errors before
+	// triggering a full node reset (rescue + wipe + retry from StateNone).
 	MaxProvisioningRetries = 10
+
+	// MaxFullResets is the maximum number of full node reset cycles before entering
+	// terminal StateError. Prevents infinite rescue loops on hardware failures.
+	MaxFullResets = 3
 )
 
 // ProvisioningState represents the current state of the machine provisioning.
@@ -90,9 +95,14 @@ type HetznerRobotMachineStatus struct {
 	FailureMessage *string `json:"failureMessage,omitempty"`
 
 	// RetryCount tracks consecutive reconciliation errors for the current state.
-	// Reset to 0 on successful state transition. Transitions to StateError at MaxProvisioningRetries.
+	// Reset to 0 on successful state transition. Triggers full reset at MaxProvisioningRetries.
 	// +optional
 	RetryCount int `json:"retryCount,omitempty"`
+
+	// FullResetCount tracks how many full node reset cycles have been attempted
+	// (rescue + wipe + retry from StateNone). Enters terminal StateError at MaxFullResets.
+	// +optional
+	FullResetCount int `json:"fullResetCount,omitempty"`
 
 	// Conditions provides observations of the operational state.
 	// +optional
