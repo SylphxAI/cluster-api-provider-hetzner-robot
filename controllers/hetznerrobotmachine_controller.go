@@ -442,6 +442,17 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	defer sshClient.Close()
 
+	// Wipe ALL disks — not just the install disk. Bare metal provisioning means
+	// clean slate. Without this, data disks retain old BlueStore/filesystem metadata
+	// and storage operators (Rook-Ceph) refuse to provision them, requiring manual
+	// intervention on every new node.
+	logger.Info("Wiping all disks on server", "ip", serverIP)
+	if out, err := sshClient.WipeAllDisks(); err != nil {
+		return ctrl.Result{}, fmt.Errorf("wipe all disks on %s: %w\nOutput: %s", serverIP, err, out)
+	} else {
+		logger.Info("All disks wiped", "ip", serverIP, "output", out)
+	}
+
 	factoryURL := hrc.Spec.TalosFactoryBaseURL
 	if factoryURL == "" {
 		factoryURL = talosFactoryDefaultBaseURL

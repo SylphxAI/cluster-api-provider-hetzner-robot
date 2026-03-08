@@ -91,33 +91,49 @@ func (c *Client) Run(command string) (string, error) {
 	return buf.String(), nil
 }
 
+// WipeAllDisks discovers all non-removable block devices and wipes them.
+// This ensures a clean slate for provisioning — no leftover partition tables,
+// BlueStore labels, or filesystem metadata from previous installations.
+// Bare metal provisioning = every disk must be clean. Rook-Ceph, for example,
+// refuses to provision OSDs on disks with existing BlueStore signatures.
+// Without this, every new node requires manual `blkdiscard` — unacceptable.
+func (c *Client) WipeAllDisks() (string, error) {
+	// Discover all non-removable, non-loop block devices (whole disks only).
+	// lsblk -dnpo NAME,TYPE,RM outputs: /dev/nvme0n1 disk 0
+	// Filters: TYPE=disk (no partitions), RM=0 (not removable/USB).
+	cmd := `set -e; ` +
+		`echo 'Discovering block devices...'; ` +
+		`DISKS=$(lsblk -dnpo NAME,TYPE,RM | awk '$2 == "disk" && $3 == "0" { print $1 }'); ` +
+		`if [ -z "$DISKS" ]; then echo 'No disks found to wipe'; exit 0; fi; ` +
+		`for disk in $DISKS; do ` +
+		`echo "Wiping $disk..."; ` +
+		`if blkdiscard "$disk" 2>/dev/null; then ` +
+		`echo "  $disk wiped via blkdiscard (TRIM)"; ` +
+		`else ` +
+		`echo "  blkdiscard unavailable for $disk, falling back to dd zero (2GB)"; ` +
+		`dd if=/dev/zero of="$disk" bs=1M count=2048 conv=notrunc 2>/dev/null; ` +
+		`fi; ` +
+		`done; ` +
+		`sync; ` +
+		`echo "All disks wiped"`
+
+	return c.Run(cmd)
+}
+
 // InstallTalos installs Talos Linux on the server.
 // It downloads the Talos raw disk image from Talos factory and writes it to the disk.
 // Then sets the boot order to boot from the disk.
+//
+// Caller must call WipeAllDisks() before this — InstallTalos only writes the image,
+// it does not wipe. Separation of concerns: wiping is a provisioning-level decision
+// (wipe everything), writing is install-level (target one specific disk).
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
 	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
 
-	// Wipe existing partition table and Talos STATE partition before writing.
-	// Without this, a previous Talos install's STATE partition (containing the old
-	// machineconfig) may survive the dd and cause the new Talos to boot in full mode
-	// instead of maintenance mode.
-	//
-	// Uses blkdiscard (NVMe TRIM) to fully erase the disk — fast, complete, and the
-	// only reliable method for NVMe. BlueStore (Ceph) writes labels at 1GB offset
-	// (0x40000000) which survives standard dd wipes. blkdiscard erases all blocks
-	// at firmware level. Falls back to 2GB dd zero for non-NVMe/non-TRIM disks.
-	//
-	// Both imageURL and disk are %q-quoted to prevent shell injection
+	// Download and write Talos image to disk.
+	// imageURL and disk are %q-quoted to prevent shell injection.
 	ddCmd := fmt.Sprintf(
 		"set -e; "+
-			"echo 'Wiping disk...'; "+
-			"if blkdiscard %[2]q 2>/dev/null; then "+
-			"echo 'Disk wiped via blkdiscard (TRIM)'; "+
-			"else "+
-			"echo 'blkdiscard unavailable, falling back to dd zero (2GB)'; "+
-			"dd if=/dev/zero of=%[2]q bs=1M count=2048 conv=notrunc 2>/dev/null; "+
-			"fi; "+
-			"sync; "+
 			"echo 'Downloading Talos image...'; "+
 			"curl -fsSL %[1]q | xzcat | dd of=%[2]q bs=4M status=progress; "+
 			"sync; "+
