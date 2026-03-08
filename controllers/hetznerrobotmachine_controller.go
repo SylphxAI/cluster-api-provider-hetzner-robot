@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"gopkg.in/yaml.v3"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
@@ -483,6 +484,40 @@ func (r *HetznerRobotMachineReconciler) stateWaitTalosMaintenanceMode(
 	return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 }
 
+// injectInstallDisk ensures machine.install.disk is set in the Talos machineconfig YAML.
+// CAPT generates configs without install disk — CAPHR must inject it from the HRM spec
+// before applying, otherwise Talos rejects the config with "install disk or diskSelector should be defined".
+func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
+	if installDisk == "" {
+		installDisk = "/dev/nvme0n1"
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal machineconfig: %w", err)
+	}
+
+	// Ensure machine.install.disk exists
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	install, ok := machine["install"].(map[string]interface{})
+	if !ok {
+		install = make(map[string]interface{})
+		machine["install"] = install
+	}
+
+	// Only set if not already defined (don't override explicit config)
+	if _, exists := install["disk"]; !exists {
+		install["disk"] = installDisk
+	}
+
+	return yaml.Marshal(config)
+}
+
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
@@ -501,6 +536,18 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		logger.Error(err, "Bootstrap data not ready yet")
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
+
+	// Inject install disk into machineconfig — CAPT doesn't include it,
+	// but Talos requires machine.install.disk to be set.
+	installDisk := hrm.Spec.InstallDisk
+	if installDisk == "" {
+		installDisk = "/dev/nvme0n1"
+	}
+	bootstrapData, err = injectInstallDisk(bootstrapData, installDisk)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("inject install disk into config: %w", err)
+	}
+	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
 
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
 
