@@ -1,0 +1,125 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: hetznerrobothosts.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: HetznerRobotHost
+    listKind: HetznerRobotHostList
+    plural: hetznerrobothosts
+    shortNames:
+    - hrh
+    singular: hetznerrobothost
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.serverID
+      name: ServerID
+      type: integer
+    - jsonPath: .spec.serverIP
+      name: ServerIP
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.machineRef.name
+      name: Machine
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HetznerRobotHost represents a single physical server in the Hetzner Robot pool.
+          One HetznerRobotHost per physical server. Permanent — not deleted when a Machine is removed.
+          When a HetznerRobotMachine needs a server, it claims an Available host via hostSelector.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HetznerRobotHostSpec defines the desired state of a physical
+              server.
+            properties:
+              installDisk:
+                default: /dev/nvme0n1
+                description: |-
+                  InstallDisk is the disk on which Talos will be installed.
+                  Defaults to /dev/nvme0n1
+                type: string
+              internalIP:
+                description: |-
+                  InternalIP is the VLAN IP address for this server (e.g. "10.10.0.1").
+                  Used with HetznerRobotCluster.Spec.VLANConfig to inject VLAN interface
+                  config into the Talos machineconfig during provisioning.
+                  Required when VLANConfig is set on the cluster.
+                type: string
+              serverID:
+                description: |-
+                  ServerID is the Hetzner Robot server ID.
+                  Find it in the Robot web console or via the Robot API.
+                minimum: 1
+                type: integer
+              serverIP:
+                description: |-
+                  ServerIP is the public IP address of the server.
+                  Used for SSH rescue access and Talos API access.
+                type: string
+            required:
+            - serverID
+            - serverIP
+            type: object
+          status:
+            description: HetznerRobotHostStatus defines the observed state of a physical
+              server.
+            properties:
+              errorMessage:
+                description: ErrorMessage contains a human-readable description of
+                  a terminal error.
+                type: string
+              machineRef:
+                description: |-
+                  MachineRef is a reference to the HetznerRobotMachine that has claimed this host.
+                  Nil when the host is Available.
+                properties:
+                  name:
+                    description: Name is the name of the HetznerRobotMachine.
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the HetznerRobotMachine.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              state:
+                description: State is the current lifecycle state of the host.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

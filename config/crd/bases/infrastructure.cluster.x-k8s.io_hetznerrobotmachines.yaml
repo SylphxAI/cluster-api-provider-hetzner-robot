@@ -1,0 +1,247 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: hetznerrobotmachines.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: HetznerRobotMachine
+    listKind: HetznerRobotMachineList
+    plural: hetznerrobotmachines
+    singular: hetznerrobotmachine
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.labels.cluster\.x-k8s\.io/cluster-name
+      name: Cluster
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: string
+    - jsonPath: .status.provisioningState
+      name: State
+      type: string
+    - jsonPath: .status.hostRef
+      name: Host
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: HetznerRobotMachine is the Schema for the hetznerrobotmachines
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
+            properties:
+              hostRef:
+                description: |-
+                  HostRef is a direct reference to a specific HetznerRobotHost by name.
+                  Mutually exclusive with HostSelector. Use this for static per-server assignments.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              hostSelector:
+                description: |-
+                  HostSelector selects an Available HetznerRobotHost by label.
+                  Mutually exclusive with HostRef. Use this for dynamic pool claiming.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              installDisk:
+                default: /dev/nvme0n1
+                description: |-
+                  InstallDisk is the disk to install Talos on.
+                  Defaults to /dev/nvme0n1
+                type: string
+              providerID:
+                description: |-
+                  ProviderID is the unique identifier for this machine.
+                  Set automatically by the controller.
+                type: string
+              talosSchematic:
+                description: |-
+                  TalosSchematic is the Talos factory schematic ID (with extensions).
+                  Example: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
+                type: string
+              talosVersion:
+                description: |-
+                  TalosVersion is the Talos version to install.
+                  Example: v1.12.4
+                type: string
+            required:
+            - talosSchematic
+            - talosVersion
+            type: object
+          status:
+            description: HetznerRobotMachineStatus defines the observed state of HetznerRobotMachine.
+            properties:
+              addresses:
+                description: Addresses is the list of addresses for this machine.
+                items:
+                  description: MachineAddress contains information for the node's
+                    address.
+                  properties:
+                    address:
+                      description: The machine address.
+                      type: string
+                    type:
+                      description: Machine address type, one of Hostname, ExternalIP,
+                        InternalIP, ExternalDNS or InternalDNS.
+                      type: string
+                  required:
+                  - address
+                  - type
+                  type: object
+                type: array
+              conditions:
+                description: Conditions provides observations of the operational state.
+                items:
+                  description: Condition defines an observation of a Cluster API resource
+                    operational state.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        Last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed. If that is not known, then using the time when
+                        the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A human readable message indicating details about the transition.
+                        This field may be empty.
+                      type: string
+                    reason:
+                      description: |-
+                        The reason for the condition's last transition in CamelCase.
+                        The specific API may choose whether or not this field is considered a guaranteed API.
+                        This field may be empty.
+                      type: string
+                    severity:
+                      description: |-
+                        severity provides an explicit classification of Reason code, so the users or machines can immediately
+                        understand the current situation and act accordingly.
+                        The Severity field MUST be set only when Status=False.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: |-
+                        type of condition in CamelCase or in foo.example.com/CamelCase.
+                        Many .condition.type values are consistent across resources like Available, but because arbitrary conditions
+                        can be useful (see .node.status.conditions), the ability to deconflict is important.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - status
+                  - type
+                  type: object
+                type: array
+              failureMessage:
+                description: FailureMessage is a verbose string indicating why this
+                  machine failed.
+                type: string
+              failureReason:
+                description: FailureReason is a brief string indicating why this machine
+                  failed.
+                type: string
+              fullResetCount:
+                description: |-
+                  FullResetCount tracks how many full node reset cycles have been attempted
+                  (rescue + wipe + retry from StateNone). Enters terminal StateError at MaxFullResets.
+                type: integer
+              hostRef:
+                description: |-
+                  HostRef tracks which HetznerRobotHost was claimed by this machine.
+                  Set by the controller during ClaimHost state.
+                type: string
+              provisioningState:
+                description: ProvisioningState is the current state of provisioning.
+                type: string
+              ready:
+                description: Ready indicates the machine is provisioned and healthy.
+                type: boolean
+              retryCount:
+                description: |-
+                  RetryCount tracks consecutive reconciliation errors for the current state.
+                  Reset to 0 on successful state transition. Triggers full reset at MaxProvisioningRetries.
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
