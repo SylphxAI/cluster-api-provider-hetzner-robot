@@ -52,6 +52,13 @@ type HetznerRobotClusterSpec struct {
 	// during provisioning. The per-node IP comes from HetznerRobotHost.Spec.InternalIP.
 	// +optional
 	VLANConfig *VLANConfig `json:"vlanConfig,omitempty"`
+
+	// TalosSecretRef references the cluster-level Talos secret (typically {cluster-name}-talos)
+	// containing the correct secretboxEncryptionSecret. CAPT may generate a different key
+	// per Machine; this ensures all nodes use the same encryption key for etcd secrets.
+	// If set, CAPHR reads the key from this secret and injects it into the machineconfig.
+	// +optional
+	TalosSecretRef *corev1.SecretReference `json:"talosSecretRef,omitempty"`
 }
 
 // HetznerRobotClusterStatus defines the observed state of HetznerRobotCluster.

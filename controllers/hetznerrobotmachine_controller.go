@@ -239,12 +239,36 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateBootstrapping:
 		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
 	case infrav1.StateError:
-		// Terminal state — human intervention required.
-		// To retry, patch status.provisioningState back to "" (StateNone).
-		logger.Info("Machine in StateError, halting reconciliation",
+		// Auto-recovery: if Talos maintenance mode is reachable, the node was manually
+		// recovered (e.g. technician reset, manual talosctl reset). Skip rescue/install
+		// and go straight to applying config.
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			logger.Info("Node in StateError but Talos maintenance mode detected — auto-recovering",
+				"ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateApplyingConfig
+			hrm.Status.RetryCount = 0
+			hrm.Status.FullResetCount = 0
+			hrm.Status.FailureReason = nil
+			hrm.Status.FailureMessage = nil
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// Auto-recovery: if rescue SSH is reachable, the server was reset into rescue.
+		// Restart provisioning from rescue state.
+		if sshrescue.IsReachable(serverIP) {
+			logger.Info("Node in StateError but rescue SSH detected — auto-recovering",
+				"ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateInRescue
+			hrm.Status.RetryCount = 0
+			hrm.Status.FullResetCount = 0
+			hrm.Status.FailureReason = nil
+			hrm.Status.FailureMessage = nil
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// No recovery possible — recheck periodically in case of manual intervention.
+		logger.Info("Machine in StateError, waiting for manual intervention or auto-recovery",
 			"failureReason", hrm.Status.FailureReason,
 			"failureMessage", hrm.Status.FailureMessage)
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	default:
 		return ctrl.Result{}, nil
 	}
@@ -655,6 +679,30 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 	return yaml.Marshal(config)
 }
 
+// injectSecretboxEncryptionSecret replaces cluster.secretboxEncryptionSecret in the
+// machineconfig YAML. CAPT may generate a different encryption key per Machine, but all
+// CP nodes must use the same key to decrypt secrets in shared etcd. This function ensures
+// the correct cluster-wide key is used.
+func injectSecretboxEncryptionSecret(configData []byte, secret string) ([]byte, error) {
+	if secret == "" {
+		return configData, nil
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal config for secretbox injection: %w", err)
+	}
+
+	cluster, _ := config["cluster"].(map[string]interface{})
+	if cluster == nil {
+		cluster = make(map[string]interface{})
+		config["cluster"] = cluster
+	}
+
+	cluster["secretboxEncryptionSecret"] = secret
+	return yaml.Marshal(config)
+}
+
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
@@ -701,6 +749,23 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"vlanID", hrc.Spec.VLANConfig.ID,
 			"interface", hrc.Spec.VLANConfig.Interface,
 			"internalIP", internalIP)
+	}
+
+	// Inject the correct secretboxEncryptionSecret from the cluster-level Talos secret.
+	// CAPT may generate a different key per Machine, but all CP nodes sharing etcd must
+	// use the same encryption key. Without this, new CP nodes can't decrypt existing secrets.
+	if hrc.Spec.TalosSecretRef != nil {
+		encryptionSecret, err := r.getSecretboxEncryptionSecret(ctx, hrc)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("get secretbox encryption secret: %w", err)
+		}
+		if encryptionSecret != "" {
+			bootstrapData, err = injectSecretboxEncryptionSecret(bootstrapData, encryptionSecret)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("inject secretbox encryption secret: %w", err)
+			}
+			logger.Info("Injected secretboxEncryptionSecret from cluster talos secret")
+		}
 	}
 
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
@@ -925,6 +990,41 @@ func (r *HetznerRobotMachineReconciler) getBootstrapData(ctx context.Context, ma
 		return nil, fmt.Errorf("bootstrap secret %s has no 'value' key", *machine.Spec.Bootstrap.DataSecretName)
 	}
 	return data, nil
+}
+
+// getSecretboxEncryptionSecret reads the correct secretboxEncryptionSecret from the
+// cluster-level Talos secret. The secret bundle is a YAML document with a
+// `secrets.secretboxencryptionsecret` field.
+func (r *HetznerRobotMachineReconciler) getSecretboxEncryptionSecret(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (string, error) {
+	if hrc.Spec.TalosSecretRef == nil {
+		return "", nil
+	}
+
+	secret := &corev1.Secret{}
+	ns := hrc.Spec.TalosSecretRef.Namespace
+	if ns == "" {
+		ns = hrc.Namespace
+	}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: hrc.Spec.TalosSecretRef.Name}, secret); err != nil {
+		return "", fmt.Errorf("get talos secret %s/%s: %w", ns, hrc.Spec.TalosSecretRef.Name, err)
+	}
+
+	bundle, ok := secret.Data["bundle"]
+	if !ok {
+		return "", fmt.Errorf("talos secret %s has no 'bundle' key", hrc.Spec.TalosSecretRef.Name)
+	}
+
+	// Parse the bundle YAML to extract secrets.secretboxencryptionsecret
+	var bundleData struct {
+		Secrets struct {
+			SecretboxEncryptionSecret string `yaml:"secretboxencryptionsecret"`
+		} `yaml:"secrets"`
+	}
+	if err := yaml.Unmarshal(bundle, &bundleData); err != nil {
+		return "", fmt.Errorf("parse talos secret bundle: %w", err)
+	}
+
+	return bundleData.Secrets.SecretboxEncryptionSecret, nil
 }
 
 // buildRobotClient creates a Robot API client from the HRC's secret.

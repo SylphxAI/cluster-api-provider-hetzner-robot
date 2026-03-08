@@ -182,6 +182,68 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 	}
 }
 
+func TestInjectSecretboxEncryptionSecret(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+cluster:
+  clusterName: test
+  secretboxEncryptionSecret: WRONG_KEY_FROM_CAPT
+`)
+	result, err := injectSecretboxEncryptionSecret(input, "CORRECT_CLUSTER_KEY")
+	if err != nil {
+		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	cluster := config["cluster"].(map[string]interface{})
+	if cluster["secretboxEncryptionSecret"] != "CORRECT_CLUSTER_KEY" {
+		t.Errorf("expected CORRECT_CLUSTER_KEY, got %v", cluster["secretboxEncryptionSecret"])
+	}
+	// Verify other cluster fields are preserved
+	if cluster["clusterName"] != "test" {
+		t.Errorf("clusterName was not preserved, got %v", cluster["clusterName"])
+	}
+}
+
+func TestInjectSecretboxEncryptionSecret_Empty(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+cluster:
+  clusterName: test
+`)
+	result, err := injectSecretboxEncryptionSecret(input, "")
+	if err != nil {
+		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty secret should return input unchanged")
+	}
+}
+
+func TestInjectSecretboxEncryptionSecret_NoCluster(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectSecretboxEncryptionSecret(input, "SOME_KEY")
+	if err != nil {
+		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	cluster := config["cluster"].(map[string]interface{})
+	if cluster["secretboxEncryptionSecret"] != "SOME_KEY" {
+		t.Errorf("expected SOME_KEY, got %v", cluster["secretboxEncryptionSecret"])
+	}
+}
+
 func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
 	input := []byte(`machine: {}`)
 	vlanCfg := &infrav1.VLANConfig{
