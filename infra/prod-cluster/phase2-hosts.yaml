@@ -14,6 +14,7 @@ metadata:
 spec:
   serverID: 2932787
   serverIP: "91.98.183.14"
+  internalIP: "10.10.0.4"
   installDisk: /dev/nvme0n1
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
@@ -27,4 +28,5 @@ metadata:
 spec:
   serverID: 2933228
   serverIP: "142.132.203.185"
+  internalIP: "10.10.0.5"
   installDisk: /dev/nvme0n1
