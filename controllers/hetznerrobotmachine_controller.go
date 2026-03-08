@@ -229,7 +229,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateInRescue:
 		return r.stateInstallTalos(ctx, hrm, hrc, serverIP)
 	case infrav1.StateInstalling:
-		return r.stateWaitInstall(ctx, hrm, serverIP)
+		return r.stateWaitInstall(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
@@ -353,7 +353,26 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
-	// Rescue is armed but SSH not up yet — still booting into rescue.
+	// Rescue is armed but SSH not up yet.
+	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
+	// of the rescue system. Detect this by checking if Talos is already up.
+	if talos.IsUp(ctx, serverIP) {
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			// Talos maintenance mode — skip rescue, proceed directly to config apply.
+			logger.Info("Rescue active but Talos booted from disk in maintenance mode — skipping rescue/install", "ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// Talos is running in full mode (old/stale config) — rescue didn't take effect.
+		// Re-activate rescue and reset again. Increment retry count to eventually fail
+		// if this keeps happening (boot order issue).
+		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
+			"serverID", serverID, "ip", serverIP)
+		hrm.Status.RetryCount++
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// Neither SSH (rescue) nor Talos (disk) is up — server is still booting.
 	logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
 	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
 }
@@ -428,6 +447,9 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -437,6 +459,16 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 		logger.Info("Talos maintenance mode detected after install", "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Edge case: if Talos is up but NOT in maintenance mode, the dd install
+	// didn't fully wipe the STATE partition — old config persisted and Talos
+	// booted in full mode. Re-activate rescue to wipe and reinstall cleanly.
+	if talos.IsUp(ctx, serverIP) {
+		logger.Info("Talos booted in full mode after install (old config persisted) — re-activating rescue to reinstall",
+			"serverID", serverID, "ip", serverIP)
+		hrm.Status.RetryCount++
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
 	// Still waiting for reboot — stay in StateInstalling until maintenance mode is detected

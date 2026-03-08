@@ -97,12 +97,20 @@ func (c *Client) Run(command string) (string, error) {
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
 	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
 
-	// Download and write Talos raw image
+	// Wipe existing partition table and Talos STATE partition before writing.
+	// Without this, a previous Talos install's STATE partition (containing the old
+	// machineconfig) may survive the dd and cause the new Talos to boot in full mode
+	// instead of maintenance mode.
 	// Both imageURL and disk are %q-quoted to prevent shell injection
 	ddCmd := fmt.Sprintf(
 		"set -e; "+
+			"echo 'Wiping disk partitions...'; "+
+			"wipefs -af %[2]q 2>/dev/null || true; "+
+			"sgdisk -Z %[2]q 2>/dev/null || true; "+
+			"dd if=/dev/zero of=%[2]q bs=1M count=100 conv=notrunc 2>/dev/null; "+
+			"sync; "+
 			"echo 'Downloading Talos image...'; "+
-			"curl -fsSL %q | xzcat | dd of=%q bs=4M status=progress; "+
+			"curl -fsSL %[1]q | xzcat | dd of=%[2]q bs=4M status=progress; "+
 			"sync; "+
 			"echo 'Talos image written'",
 		imageURL, disk,
