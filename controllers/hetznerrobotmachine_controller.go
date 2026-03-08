@@ -227,7 +227,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInRescue:
-		return r.stateInstallTalos(ctx, hrm, hrc, serverIP)
+		return r.stateInstallTalos(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInstalling:
 		return r.stateWaitInstall(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateBootingTalos:
@@ -382,6 +382,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
 	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -435,7 +437,18 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
 	}
 
-	logger.Info("Talos image written, triggering reboot", "ip", serverIP)
+	logger.Info("Talos image written, deactivating rescue before reboot", "ip", serverIP)
+
+	// Deactivate rescue BEFORE rebooting. The EFI boot order is set to PXE first,
+	// then Talos. If rescue stays active, PXE responds → boots rescue again instead
+	// of Talos. By deactivating rescue, PXE silently fails → falls through to Talos.
+	if err := robotClient.DeactivateRescue(ctx, serverID); err != nil {
+		// Non-fatal: worst case the server boots back into rescue, and the next
+		// reconcile (stateWaitInstall) will detect it and retry.
+		logger.Error(err, "Failed to deactivate rescue, server may boot back to rescue",
+			"serverID", serverID)
+	}
+
 	// Reboot into Talos
 	sshClient.Run("reboot") //nolint:errcheck // reboot disconnects SSH, error expected
 
@@ -469,6 +482,16 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 			"serverID", serverID, "ip", serverIP)
 		hrm.Status.RetryCount++
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// Edge case: if rescue SSH is reachable, the server booted back into rescue
+	// instead of Talos (e.g., rescue wasn't deactivated, or EFI boot order issue).
+	// Re-install Talos from rescue.
+	if sshrescue.IsReachable(serverIP) {
+		logger.Info("Server booted back into rescue after install — re-installing",
+			"serverID", serverID, "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateInRescue
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
 	// Still waiting for reboot — stay in StateInstalling until maintenance mode is detected
