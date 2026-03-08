@@ -130,55 +130,25 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("install Talos image: %w\nOutput: %s", err, out)
 	}
 
-	// Configure EFI boot order: PXE/Network FIRST, then Talos.
+	// EFI boot configuration.
 	//
-	// Hetzner rescue works by activating a one-shot PXE boot via BMC. When rescue is
-	// active, the NIC responds to PXE DHCP → boots rescue environment. When rescue is
-	// NOT active, PXE fails silently (no DHCP response) → UEFI falls through to the
-	// next entry (Talos on NVMe) → normal boot.
+	// Do NOT use efibootmgr to manipulate boot order. The previous approach of
+	// creating custom boot entries and reordering caused servers to become
+	// completely unbootable when the entry references became invalid (e.g., after
+	// blkdiscard wiped the GPT that the entry pointed to). UEFI hangs on invalid
+	// entries instead of falling through.
 	//
-	// CRITICAL: If Talos is first, UEFI boots NVMe before reaching PXE, and rescue
-	// mode NEVER activates — the server boots straight into Talos every time, making
-	// future reprovisioning impossible without manual IPMI intervention.
+	// Instead, rely on two mechanisms:
+	//   1. UEFI auto-discovery: UEFI firmware automatically finds and boots
+	//      /EFI/boot/bootx64.efi on any ESP. Talos' dd image includes this.
+	//   2. BMC PXE override: Hetzner's BMC forces one-shot PXE boot when rescue
+	//      is activated, bypassing UEFI boot order entirely. The controller
+	//      deactivates rescue before rebooting after install, so PXE doesn't
+	//      intercept the Talos boot.
 	//
-	// Strategy:
-	//   1. Record existing boot order (includes PXE entries like "Network Boot")
-	//   2. Create a new Talos EFI entry (if not already present)
-	//   3. Set boot order: [...PXE entries..., Talos, ...other entries...]
-	//      PXE first = rescue works. No rescue = PXE fails silently → Talos boots.
-	bootCmd := fmt.Sprintf(
-		"set -e; "+
-			"TARGET_DISK=%q; "+
-			"if ! command -v efibootmgr &>/dev/null; then echo 'efibootmgr not available, skipping EFI config'; exit 0; fi; "+
-			// Capture existing boot order (e.g. "0000 0001 0002")
-			"OLD_ORDER=$(efibootmgr | grep '^BootOrder:' | awk '{print $2}' | tr ',' ' '); "+
-			// Remove any existing 'Talos' entries to avoid duplicates
-			"for NUM in $(efibootmgr | grep -i 'talos' | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/'); do efibootmgr -b $NUM -B || true; done; "+
-			// Find the EFI partition (e.g. nvme0n1p1 or nvme0n1p12)
-			"DISK_PART=$(ls \"${TARGET_DISK}\"* 2>/dev/null | grep -E '[0-9]+$' | sort | head -1); "+
-			"if [ -z \"$DISK_PART\" ]; then echo 'No EFI partition found, skipping'; exit 0; fi; "+
-			"PART=$(echo \"$DISK_PART\" | grep -oE '[0-9]+$'); "+
-			// Create new Talos boot entry and capture its ID
-			"NEW_ENTRY=$(efibootmgr -c -d \"${TARGET_DISK}\" -p \"$PART\" -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' | grep 'Boot[0-9A-Fa-f].*\\* Talos' | head -1 | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/'); "+
-			"if [ -z \"$NEW_ENTRY\" ]; then echo 'Could not get new entry ID, skipping order set'; exit 0; fi; "+
-			// Identify PXE/Network boot entries (case-insensitive match for Network, PXE, IPv4, IPv6, LAN)
-			"PXE_ENTRIES=$(efibootmgr | grep -iE 'network|pxe|ipv[46]|lan|uefi.*nic' | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/' | tr '\\n' ' '); "+
-			// Build new boot order: PXE entries first, then Talos, then remaining entries
-			// This ensures rescue mode can always intercept via PXE when activated.
-			// When rescue is NOT active, PXE silently fails (no DHCP) → falls through to Talos.
-			"OTHER_ENTRIES=$(echo $OLD_ORDER | tr ' ' '\\n' | grep -ivE \"$(echo $PXE_ENTRIES $NEW_ENTRY | tr ' ' '|')\" | tr '\\n' ' '); "+
-			"NEW_ORDER=$(echo \"$PXE_ENTRIES $NEW_ENTRY $OTHER_ENTRIES\" | xargs | tr ' ' ','); "+
-			"efibootmgr -o \"$NEW_ORDER\"; "+
-			"echo \"EFI boot order set: $NEW_ORDER (PXE first, then Talos)\"",
-		disk,
-	)
-
-	out, err = c.Run(bootCmd)
-	if err != nil {
-		// Non-fatal: log the output but don't fail the install.
-		// BIOS boot sector is also written by Talos installer as fallback.
-		_ = out
-	}
+	// This is simpler and more robust than efibootmgr manipulation.
+	// Re-read partition table so UEFI sees the new GPT from the dd image.
+	out, _ = c.Run(fmt.Sprintf("partprobe %s 2>/dev/null; echo 'Partition table refreshed'", disk))
 
 	return nil
 }
