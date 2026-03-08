@@ -101,13 +101,22 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	// Without this, a previous Talos install's STATE partition (containing the old
 	// machineconfig) may survive the dd and cause the new Talos to boot in full mode
 	// instead of maintenance mode.
+	//
+	// Uses blkdiscard (NVMe TRIM) to fully erase the disk — fast, complete, and the
+	// only reliable method for NVMe. BlueStore (Ceph) writes labels at 1GB offset
+	// (0x40000000) which survives standard dd wipes. blkdiscard erases all blocks
+	// at firmware level. Falls back to 2GB dd zero for non-NVMe/non-TRIM disks.
+	//
 	// Both imageURL and disk are %q-quoted to prevent shell injection
 	ddCmd := fmt.Sprintf(
 		"set -e; "+
-			"echo 'Wiping disk partitions...'; "+
-			"wipefs -af %[2]q 2>/dev/null || true; "+
-			"sgdisk -Z %[2]q 2>/dev/null || true; "+
-			"dd if=/dev/zero of=%[2]q bs=1M count=100 conv=notrunc 2>/dev/null; "+
+			"echo 'Wiping disk...'; "+
+			"if blkdiscard %[2]q 2>/dev/null; then "+
+			"echo 'Disk wiped via blkdiscard (TRIM)'; "+
+			"else "+
+			"echo 'blkdiscard unavailable, falling back to dd zero (2GB)'; "+
+			"dd if=/dev/zero of=%[2]q bs=1M count=2048 conv=notrunc 2>/dev/null; "+
+			"fi; "+
 			"sync; "+
 			"echo 'Downloading Talos image...'; "+
 			"curl -fsSL %[1]q | xzcat | dd of=%[2]q bs=4M status=progress; "+

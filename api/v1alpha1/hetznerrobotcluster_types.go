@@ -8,6 +8,26 @@ import (
 
 const ClusterFinalizer = "hetznerrobotcluster.infrastructure.cluster.x-k8s.io"
 
+// VLANConfig defines an internal VLAN network to be injected into Talos machineconfigs.
+// When set, CAPHR injects a VLAN interface entry during ApplyConfig, ensuring
+// each node gets its internal IP from HetznerRobotHost.Spec.InternalIP.
+type VLANConfig struct {
+	// ID is the VLAN ID (e.g. 4000 for Hetzner vSwitch).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	ID int `json:"id"`
+
+	// Interface is the parent NIC name (e.g. "enp193s0f0np0").
+	// Must match the physical interface on all servers in this cluster.
+	Interface string `json:"interface"`
+
+	// PrefixLength is the CIDR prefix length for the VLAN subnet (e.g. 24 for /24).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=128
+	// +kubebuilder:default=24
+	PrefixLength int `json:"prefixLength,omitempty"`
+}
+
 // HetznerRobotClusterSpec defines the desired state of HetznerRobotCluster.
 type HetznerRobotClusterSpec struct {
 	// ControlPlaneEndpoint is the endpoint for the control plane.
@@ -26,6 +46,12 @@ type HetznerRobotClusterSpec struct {
 	// Defaults to https://factory.talos.dev
 	// +optional
 	TalosFactoryBaseURL string `json:"talosFactoryBaseURL,omitempty"`
+
+	// VLANConfig configures an internal VLAN network on all machines in this cluster.
+	// When set, CAPHR injects VLAN interface config into each node's Talos machineconfig
+	// during provisioning. The per-node IP comes from HetznerRobotHost.Spec.InternalIP.
+	// +optional
+	VLANConfig *VLANConfig `json:"vlanConfig,omitempty"`
 }
 
 // HetznerRobotClusterStatus defines the observed state of HetznerRobotCluster.

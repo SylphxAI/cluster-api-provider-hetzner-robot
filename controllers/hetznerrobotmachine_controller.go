@@ -233,7 +233,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
-		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverID, serverIP)
+		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, hrh, serverID, serverIP)
 	case infrav1.StateWaitingForBoot:
 		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
 	case infrav1.StateBootstrapping:
@@ -550,6 +550,88 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
+// injectVLANConfig adds a VLAN interface to the Talos machineconfig.
+// Ensures the parent interface has dhcp: true (to preserve public IP) and adds
+// the VLAN with the host's internal IP address.
+//
+// CRITICAL: Talos strategic merge on machine.network.interfaces uses "interface" as key.
+// If the original config has no explicit interface entry, this creates one. The dhcp: true
+// MUST be included or Talos drops auto-DHCP on the interface → public IP lost → node unreachable.
+func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string) ([]byte, error) {
+	if vlanCfg == nil || internalIP == "" {
+		return configData, nil
+	}
+
+	prefixLen := vlanCfg.PrefixLength
+	if prefixLen == 0 {
+		prefixLen = 24
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal machineconfig for VLAN injection: %w", err)
+	}
+
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	network, ok := machine["network"].(map[string]interface{})
+	if !ok {
+		network = make(map[string]interface{})
+		machine["network"] = network
+	}
+
+	// Build the VLAN entry
+	vlanEntry := map[string]interface{}{
+		"vlanId": vlanCfg.ID,
+		"addresses": []interface{}{
+			fmt.Sprintf("%s/%d", internalIP, prefixLen),
+		},
+	}
+
+	// Build the interface entry with dhcp: true + VLAN
+	ifaceEntry := map[string]interface{}{
+		"interface": vlanCfg.Interface,
+		"dhcp":      true, // CRITICAL: preserve public IP via DHCP
+		"vlans":     []interface{}{vlanEntry},
+	}
+
+	// Find or create the interfaces list
+	interfaces, ok := network["interfaces"].([]interface{})
+	if !ok {
+		interfaces = []interface{}{}
+	}
+
+	// Check if an entry for this interface already exists — merge VLAN into it
+	found := false
+	for i, iface := range interfaces {
+		ifMap, ok := iface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if ifMap["interface"] == vlanCfg.Interface {
+			// Ensure dhcp: true is set
+			ifMap["dhcp"] = true
+			// Add VLAN to existing vlans list (or create new)
+			existingVlans, _ := ifMap["vlans"].([]interface{})
+			ifMap["vlans"] = append(existingVlans, vlanEntry)
+			interfaces[i] = ifMap
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		interfaces = append(interfaces, ifaceEntry)
+	}
+
+	network["interfaces"] = interfaces
+	return yaml.Marshal(config)
+}
+
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
@@ -557,6 +639,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	machine *clusterv1.Machine,
 	cluster *clusterv1.Cluster,
 	hrc *infrav1.HetznerRobotCluster,
+	hrh *infrav1.HetznerRobotHost,
 	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
@@ -580,6 +663,22 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("inject install disk into config: %w", err)
 	}
 	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
+
+	// Inject VLAN config if configured on the cluster
+	if hrc.Spec.VLANConfig != nil {
+		internalIP := hrh.Spec.InternalIP
+		if internalIP == "" {
+			return ctrl.Result{}, fmt.Errorf("VLANConfig is set on cluster but host %s has no internalIP", hrh.Name)
+		}
+		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject VLAN config: %w", err)
+		}
+		logger.Info("Injected VLAN config into machineconfig",
+			"vlanID", hrc.Spec.VLANConfig.ID,
+			"interface", hrc.Spec.VLANConfig.Interface,
+			"internalIP", internalIP)
+	}
 
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
 

@@ -33,6 +33,13 @@ type HetznerRobotHostSpec struct {
 	// Used for SSH rescue access and Talos API access.
 	ServerIP string `json:"serverIP"`
 
+	// InternalIP is the VLAN IP address for this server (e.g. "10.10.0.1").
+	// Used with HetznerRobotCluster.Spec.VLANConfig to inject VLAN interface
+	// config into the Talos machineconfig during provisioning.
+	// Required when VLANConfig is set on the cluster.
+	// +optional
+	InternalIP string `json:"internalIP,omitempty"`
+
 	// InstallDisk is the disk on which Talos will be installed.
 	// Defaults to /dev/nvme0n1
 	// +optional

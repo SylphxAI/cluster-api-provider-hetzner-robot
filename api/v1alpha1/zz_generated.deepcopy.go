@@ -69,6 +69,11 @@ func (in *HetznerRobotClusterSpec) DeepCopyInto(out *HetznerRobotClusterSpec) {
 	out.ControlPlaneEndpoint = in.ControlPlaneEndpoint
 	out.RobotSecretRef = in.RobotSecretRef
 	out.SSHSecretRef = in.SSHSecretRef
+	if in.VLANConfig != nil {
+		in, out := &in.VLANConfig, &out.VLANConfig
+		*out = new(VLANConfig)
+		**out = **in
+	}
 }
 
 func (in *HetznerRobotClusterSpec) DeepCopy() *HetznerRobotClusterSpec {
@@ -410,6 +415,19 @@ func (in *MachineReference) DeepCopy() *MachineReference {
 		return nil
 	}
 	out := new(MachineReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *VLANConfig) DeepCopyInto(out *VLANConfig) {
+	*out = *in
+}
+
+func (in *VLANConfig) DeepCopy() *VLANConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(VLANConfig)
 	in.DeepCopyInto(out)
 	return out
 }
