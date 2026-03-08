@@ -43,7 +43,7 @@ func IsUp(ctx context.Context, ip string) bool {
 //   - Maintenance mode: server accepts the call and returns a validation/parse error
 //     (not "certificate required") → maintenance mode confirmed.
 //   - Full mode: server rejects at gRPC layer with "certificate required" → not maintenance.
-//   - Unreachable: dial or context error → not maintenance.
+//   - Unreachable/timeout: dial or context error → not maintenance (conservative default).
 func IsInMaintenanceMode(ctx context.Context, ip string) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -60,10 +60,27 @@ func IsInMaintenanceMode(ctx context.Context, ip string) bool {
 	// Full mode returns "certificate required" at the gRPC transport layer.
 	_, err = client.ApplyConfiguration(probeCtx, &machinepb.ApplyConfigurationRequest{})
 	if err != nil {
-		if strings.Contains(err.Error(), "certificate required") {
-			return false // full mode — server demands client cert
+		errMsg := err.Error()
+		// Full mode — server demands client cert. Definitely not maintenance.
+		if strings.Contains(errMsg, "certificate required") {
+			return false
 		}
-		return true // any other error (e.g. validation) means server is in maintenance mode
+		// Transport/connectivity errors — server may be unreachable, rebooting, or an
+		// old Talos instance that's slow to respond. Conservative: treat as NOT maintenance
+		// to avoid skipping rescue/install when the node has a stale OS.
+		if strings.Contains(errMsg, "deadline exceeded") ||
+			strings.Contains(errMsg, "context canceled") ||
+			strings.Contains(errMsg, "connection refused") ||
+			strings.Contains(errMsg, "connection reset") ||
+			strings.Contains(errMsg, "i/o timeout") ||
+			strings.Contains(errMsg, "EOF") ||
+			strings.Contains(errMsg, "Unavailable") ||
+			strings.Contains(errMsg, "transport:") {
+			return false
+		}
+		// Application-level error (e.g. validation, parse) → server IS in maintenance mode
+		// and accepted the call without requiring client cert.
+		return true
 	}
 	return true // unexpected success — treat as maintenance mode
 }
