@@ -218,11 +218,6 @@ spec:
                 description: FailureReason is a brief string indicating why this machine
                   failed.
                 type: string
-              fullResetCount:
-                description: |-
-                  FullResetCount tracks how many full node reset cycles have been attempted
-                  (rescue + wipe + retry from StateNone). Enters terminal StateError at MaxFullResets.
-                type: integer
               hostRef:
                 description: |-
                   HostRef tracks which HetznerRobotHost was claimed by this machine.
@@ -237,7 +232,7 @@ spec:
               retryCount:
                 description: |-
                   RetryCount tracks consecutive reconciliation errors for the current state.
-                  Reset to 0 on successful state transition. Triggers full reset at MaxProvisioningRetries.
+                  Reset to 0 on success. Enters terminal StateError at MaxProvisioningRetries.
                 type: integer
             type: object
         type: object

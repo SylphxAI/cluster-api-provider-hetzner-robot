@@ -1,0 +1,91 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: hetznerrobotremediationtemplates.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: HetznerRobotRemediationTemplate
+    listKind: HetznerRobotRemediationTemplateList
+    plural: hetznerrobotremediationtemplates
+    singular: hetznerrobotremediationtemplate
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HetznerRobotRemediationTemplate is the Schema for the hetznerrobotremediationtemplates API.
+          Referenced by MachineHealthCheck to instantiate HetznerRobotRemediation objects.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HetznerRobotRemediationTemplateSpec defines the desired state
+              of HetznerRobotRemediationTemplate.
+            properties:
+              template:
+                description: HetznerRobotRemediationTemplateResource describes the
+                  data needed to create a HetznerRobotRemediation from a template.
+                properties:
+                  metadata:
+                    type: object
+                  spec:
+                    description: HetznerRobotRemediationSpec defines the desired state
+                      of HetznerRobotRemediation.
+                    properties:
+                      strategy:
+                        description: Strategy defines the remediation strategy to
+                          use.
+                        properties:
+                          retryLimit:
+                            default: 1
+                            description: |-
+                              RetryLimit is the maximum number of hardware resets before giving up.
+                              When exhausted, the remediation enters Deleting phase and CAPI handles Machine replacement.
+                            minimum: 1
+                            type: integer
+                          timeout:
+                            default: 300s
+                            description: |-
+                              Timeout is the duration to wait after a hardware reset for the node to recover
+                              before considering the attempt failed.
+                            type: string
+                          type:
+                            default: Reboot
+                            description: Type of remediation. Currently only "Reboot"
+                              (hardware reset via Robot API).
+                            enum:
+                            - Reboot
+                            type: string
+                        type: object
+                    type: object
+                required:
+                - spec
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true

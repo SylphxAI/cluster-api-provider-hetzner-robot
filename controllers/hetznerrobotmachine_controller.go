@@ -123,29 +123,15 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		msg := err.Error()
 		hrm.Status.FailureMessage = &msg
 		if hrm.Status.RetryCount >= infrav1.MaxProvisioningRetries {
-			hrm.Status.FullResetCount++
-			if hrm.Status.FullResetCount >= infrav1.MaxFullResets {
-				// Hard failure: too many full reset cycles → human intervention needed.
-				logger.Error(err, "Max full resets exceeded, entering terminal StateError",
-					"retries", hrm.Status.RetryCount,
-					"fullResets", hrm.Status.FullResetCount,
-					"state", hrm.Status.ProvisioningState)
-				reason := "MaxFullResetsExceeded"
-				hrm.Status.FailureReason = &reason
-				hrm.Status.ProvisioningState = infrav1.StateError
-				hrm.Status.Ready = false
-				return ctrl.Result{}, nil
-			}
-			// Soft failure: trigger full node reset (rescue + wipe) and retry from StateNone.
-			// This auto-recovers from: wrong machineconfig CA, stuck installs, UEFI issues.
-			logger.Error(err, "Max retries exceeded, triggering full node reset and retry",
+			// Terminal failure: max retries exceeded → MHC remediation or manual deletion.
+			logger.Error(err, "Max provisioning retries exceeded, entering terminal StateError",
 				"retries", hrm.Status.RetryCount,
-				"fullResets", hrm.Status.FullResetCount,
 				"state", hrm.Status.ProvisioningState)
-			hrm.Status.RetryCount = 0
-			hrm.Status.FailureMessage = nil
-			hrm.Status.ProvisioningState = infrav1.StateNone // Restart full provisioning cycle
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			reason := "MaxProvisioningRetriesExceeded"
+			hrm.Status.FailureReason = &reason
+			hrm.Status.ProvisioningState = infrav1.StateError
+			hrm.Status.Ready = false
+			return ctrl.Result{}, nil
 		}
 		// Exponential backoff: 30s × 2^(retryCount-1), max 5 min
 		backoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
@@ -156,9 +142,8 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			"error", err.Error(), "retryCount", hrm.Status.RetryCount, "backoff", backoff)
 		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
-	// Success: reset retry counters
+	// Success: reset retry counter
 	hrm.Status.RetryCount = 0
-	hrm.Status.FullResetCount = 0
 	hrm.Status.FailureMessage = nil
 	return result, nil
 }
@@ -239,36 +224,12 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateBootstrapping:
 		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
 	case infrav1.StateError:
-		// Auto-recovery: if Talos maintenance mode is reachable, the node was manually
-		// recovered (e.g. technician reset, manual talosctl reset). Skip rescue/install
-		// and go straight to applying config.
-		if talos.IsInMaintenanceMode(ctx, serverIP) {
-			logger.Info("Node in StateError but Talos maintenance mode detected — auto-recovering",
-				"ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateApplyingConfig
-			hrm.Status.RetryCount = 0
-			hrm.Status.FullResetCount = 0
-			hrm.Status.FailureReason = nil
-			hrm.Status.FailureMessage = nil
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-		}
-		// Auto-recovery: if rescue SSH is reachable, the server was reset into rescue.
-		// Restart provisioning from rescue state.
-		if sshrescue.IsReachable(serverIP) {
-			logger.Info("Node in StateError but rescue SSH detected — auto-recovering",
-				"ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateInRescue
-			hrm.Status.RetryCount = 0
-			hrm.Status.FullResetCount = 0
-			hrm.Status.FailureReason = nil
-			hrm.Status.FailureMessage = nil
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-		}
-		// No recovery possible — recheck periodically in case of manual intervention.
-		logger.Info("Machine in StateError, waiting for manual intervention or auto-recovery",
+		// Terminal state. No auto-recovery. No polling.
+		// Recovery via MachineHealthCheck remediation or manual Machine deletion.
+		logger.Info("Machine in terminal error state",
 			"failureReason", hrm.Status.FailureReason,
 			"failureMessage", hrm.Status.FailureMessage)
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{}, nil
 	}

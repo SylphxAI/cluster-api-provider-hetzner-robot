@@ -1,0 +1,75 @@
+# MachineHealthCheck for control-plane nodes.
+# maxUnhealthy: 34% provides quorum protection — won't remediate more than 1/3 of CP nodes.
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineHealthCheck
+metadata:
+  name: cp-health-check
+  namespace: default
+spec:
+  clusterName: production
+  maxUnhealthy: 34%
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/control-plane: ""
+  unhealthyConditions:
+    - type: Ready
+      status: Unknown
+      timeout: 300s
+    - type: Ready
+      status: "False"
+      timeout: 300s
+  remediationTemplate:
+    kind: HetznerRobotRemediationTemplate
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    name: cp-remediation
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotRemediationTemplate
+metadata:
+  name: cp-remediation
+  namespace: default
+spec:
+  template:
+    spec:
+      strategy:
+        type: Reboot
+        retryLimit: 2
+        timeout: 300s
+---
+# MachineHealthCheck for worker nodes.
+# maxUnhealthy: 50% and more aggressive retry for workers.
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineHealthCheck
+metadata:
+  name: worker-health-check
+  namespace: default
+spec:
+  clusterName: production
+  maxUnhealthy: 50%
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/deployment-name: workers
+  unhealthyConditions:
+    - type: Ready
+      status: Unknown
+      timeout: 300s
+    - type: Ready
+      status: "False"
+      timeout: 300s
+  remediationTemplate:
+    kind: HetznerRobotRemediationTemplate
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    name: worker-remediation
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: HetznerRobotRemediationTemplate
+metadata:
+  name: worker-remediation
+  namespace: default
+spec:
+  template:
+    spec:
+      strategy:
+        type: Reboot
+        retryLimit: 3
+        timeout: 180s

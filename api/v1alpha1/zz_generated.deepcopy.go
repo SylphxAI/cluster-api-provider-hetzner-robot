@@ -431,3 +431,184 @@ func (in *VLANConfig) DeepCopy() *VLANConfig {
 	in.DeepCopyInto(out)
 	return out
 }
+
+// ─── HetznerRobotRemediation DeepCopy ──────────────────────────────────────────
+
+func (in *HetznerRobotRemediation) DeepCopyInto(out *HetznerRobotRemediation) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *HetznerRobotRemediation) DeepCopy() *HetznerRobotRemediation {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediation)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediation) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotRemediationList) DeepCopyInto(out *HetznerRobotRemediationList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]HetznerRobotRemediation, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *HetznerRobotRemediationList) DeepCopy() *HetznerRobotRemediationList {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediationList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotRemediationSpec) DeepCopyInto(out *HetznerRobotRemediationSpec) {
+	*out = *in
+}
+
+func (in *HetznerRobotRemediationSpec) DeepCopy() *HetznerRobotRemediationSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediationStatus) DeepCopyInto(out *HetznerRobotRemediationStatus) {
+	*out = *in
+	if in.LastRemediated != nil {
+		in, out := &in.LastRemediated, &out.LastRemediated
+		*out = (*in).DeepCopy()
+	}
+}
+
+func (in *HetznerRobotRemediationStatus) DeepCopy() *HetznerRobotRemediationStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *RemediationStrategy) DeepCopyInto(out *RemediationStrategy) {
+	*out = *in
+}
+
+func (in *RemediationStrategy) DeepCopy() *RemediationStrategy {
+	if in == nil {
+		return nil
+	}
+	out := new(RemediationStrategy)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// ─── HetznerRobotRemediationTemplate DeepCopy ─────────────────────────────────
+
+func (in *HetznerRobotRemediationTemplate) DeepCopyInto(out *HetznerRobotRemediationTemplate) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+}
+
+func (in *HetznerRobotRemediationTemplate) DeepCopy() *HetznerRobotRemediationTemplate {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationTemplate)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediationTemplate) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotRemediationTemplateList) DeepCopyInto(out *HetznerRobotRemediationTemplateList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]HetznerRobotRemediationTemplate, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *HetznerRobotRemediationTemplateList) DeepCopy() *HetznerRobotRemediationTemplateList {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationTemplateList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediationTemplateList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotRemediationTemplateSpec) DeepCopyInto(out *HetznerRobotRemediationTemplateSpec) {
+	*out = *in
+	in.Template.DeepCopyInto(&out.Template)
+}
+
+func (in *HetznerRobotRemediationTemplateSpec) DeepCopy() *HetznerRobotRemediationTemplateSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationTemplateSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotRemediationTemplateResource) DeepCopyInto(out *HetznerRobotRemediationTemplateResource) {
+	*out = *in
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	out.Spec = in.Spec
+}
+
+func (in *HetznerRobotRemediationTemplateResource) DeepCopy() *HetznerRobotRemediationTemplateResource {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotRemediationTemplateResource)
+	in.DeepCopyInto(out)
+	return out
+}

@@ -50,6 +50,7 @@ rules:
   - hetznerrobotclusters/finalizers
   - hetznerrobothosts/finalizers
   - hetznerrobotmachines/finalizers
+  - hetznerrobotremediations/finalizers
   verbs:
   - update
 - apiGroups:
@@ -58,7 +59,18 @@ rules:
   - hetznerrobotclusters/status
   - hetznerrobothosts/status
   - hetznerrobotmachines/status
+  - hetznerrobotremediations/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - hetznerrobotremediations
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
