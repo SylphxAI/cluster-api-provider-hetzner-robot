@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -91,16 +92,18 @@ func (r *HetznerRobotRemediationReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	logger = logger.WithValues("serverID", serverID)
+	// Inject enriched logger into context so phase methods get full structured context.
+	ctx = log.IntoContext(ctx, logger)
 
 	switch remediation.Status.Phase {
 	case "": // Initial — no phase set yet
-		return r.reconcileInitial(ctx, remediation, serverID, hrc, logger)
+		return r.reconcileInitial(ctx, remediation, serverID, hrc)
 
 	case infrav1.RemediationPhaseRunning:
-		return r.reconcileRunning(ctx, remediation, logger)
+		return r.reconcileRunning(ctx, remediation)
 
 	case infrav1.RemediationPhaseWaiting:
-		return r.reconcileWaiting(ctx, remediation, serverID, hrc, logger)
+		return r.reconcileWaiting(ctx, remediation, serverID, hrc)
 
 	default:
 		logger.Info("Unknown remediation phase, ignoring", "phase", remediation.Status.Phase)
@@ -114,16 +117,15 @@ func (r *HetznerRobotRemediationReconciler) reconcileInitial(
 	remediation *infrav1.HetznerRobotRemediation,
 	serverID int,
 	hrc *infrav1.HetznerRobotCluster,
-	logger interface{ Info(string, ...any) },
 ) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	robotClient, err := r.buildRobotClient(ctx, hrc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
 	}
 
-	log.Info("Initiating hardware reset for unhealthy machine", "serverID", serverID)
+	logger.Info("Initiating hardware reset for unhealthy machine", "serverID", serverID)
 	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
 		return ctrl.Result{}, fmt.Errorf("hardware reset server %d: %w", serverID, err)
 	}
@@ -133,9 +135,8 @@ func (r *HetznerRobotRemediationReconciler) reconcileInitial(
 	remediation.Status.LastRemediated = &now
 	remediation.Status.RetryCount = 1
 
-	timeout := remediation.Spec.Strategy.Timeout.Duration
+	timeout := r.getTimeout(remediation)
 	logger.Info("Hardware reset issued, waiting for recovery",
-		"serverID", serverID,
 		"retryCount", remediation.Status.RetryCount,
 		"timeout", timeout,
 	)
@@ -144,22 +145,23 @@ func (r *HetznerRobotRemediationReconciler) reconcileInitial(
 }
 
 // reconcileRunning transitions from Running to Waiting after the timeout period has elapsed.
-// The requeue delay from the previous phase acts as the timer.
+// The requeue delay from reconcileInitial/reconcileWaiting acts as the timer — by the time
+// this fires, the node has already had the full timeout to recover.
 func (r *HetznerRobotRemediationReconciler) reconcileRunning(
-	_ context.Context,
+	ctx context.Context,
 	remediation *infrav1.HetznerRobotRemediation,
-	logger interface{ Info(string, ...any) },
 ) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 	remediation.Status.Phase = infrav1.RemediationPhaseWaiting
 
-	timeout := remediation.Spec.Strategy.Timeout.Duration
-	logger.Info("Recovery timeout elapsed, transitioning to Waiting",
+	logger.Info("Recovery timeout elapsed, checking retry status",
 		"retryCount", remediation.Status.RetryCount,
 		"retryLimit", remediation.Spec.Strategy.RetryLimit,
-		"timeout", timeout,
 	)
 
-	return ctrl.Result{RequeueAfter: timeout}, nil
+	// Requeue immediately — the timeout already elapsed during Running phase.
+	// reconcileWaiting will decide: retry (another reset) or give up (Deleting).
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // reconcileWaiting checks whether the retry limit is exhausted.
@@ -170,14 +172,16 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 	remediation *infrav1.HetznerRobotRemediation,
 	serverID int,
 	hrc *infrav1.HetznerRobotCluster,
-	logger interface{ Info(string, ...any) },
 ) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
 	if remediation.Status.RetryCount >= remediation.Spec.Strategy.RetryLimit {
 		// Retry limit exhausted — enter terminal phase.
-		// CAPI will see that remediation is complete (Deleting) and delete the Machine,
-		// triggering a replacement through the MachineDeployment/MachineSet.
+		// The node is still unhealthy after all retry attempts. MHC sees the
+		// remediation CR still exists and node is unhealthy — it will handle
+		// Machine deletion based on its own maxUnhealthy policy.
 		remediation.Status.Phase = infrav1.RemediationPhaseDeleting
-		logger.Info("Retry limit exhausted, transitioning to Deleting phase — CAPI will replace the Machine",
+		logger.Info("Retry limit exhausted, entering terminal Deleting phase",
 			"retryCount", remediation.Status.RetryCount,
 			"retryLimit", remediation.Spec.Strategy.RetryLimit,
 		)
@@ -190,8 +194,11 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
 	}
 
-	log := log.FromContext(ctx)
-	log.Info("Issuing retry hardware reset", "serverID", serverID, "retryCount", remediation.Status.RetryCount+1)
+	logger.Info("Issuing retry hardware reset",
+		"serverID", serverID,
+		"retryCount", remediation.Status.RetryCount+1,
+		"retryLimit", remediation.Spec.Strategy.RetryLimit,
+	)
 	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
 		return ctrl.Result{}, fmt.Errorf("hardware reset server %d: %w", serverID, err)
 	}
@@ -201,11 +208,9 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 	remediation.Status.LastRemediated = &now
 	remediation.Status.RetryCount++
 
-	timeout := remediation.Spec.Strategy.Timeout.Duration
-	logger.Info("Retry hardware reset issued",
-		"serverID", serverID,
+	timeout := r.getTimeout(remediation)
+	logger.Info("Retry hardware reset issued, waiting for recovery",
 		"retryCount", remediation.Status.RetryCount,
-		"retryLimit", remediation.Spec.Strategy.RetryLimit,
 		"timeout", timeout,
 	)
 
@@ -291,6 +296,14 @@ func (r *HetznerRobotRemediationReconciler) buildRobotClient(ctx context.Context
 		return nil, fmt.Errorf("get robot secret %s/%s: %w", ns, hrc.Spec.RobotSecretRef.Name, err)
 	}
 	return robot.New(string(secret.Data["robot-user"]), string(secret.Data["robot-password"])), nil
+}
+
+// getTimeout returns the configured strategy timeout, defaulting to 5 minutes if unset.
+func (r *HetznerRobotRemediationReconciler) getTimeout(remediation *infrav1.HetznerRobotRemediation) time.Duration {
+	if d := remediation.Spec.Strategy.Timeout.Duration; d > 0 {
+		return d
+	}
+	return 5 * time.Minute
 }
 
 // SetupWithManager sets up the controller with the Manager.
