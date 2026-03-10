@@ -697,6 +697,42 @@ func injectSecretboxEncryptionSecret(configData []byte, secret string) ([]byte, 
 	return yaml.Marshal(config)
 }
 
+// injectProviderID sets machine.kubelet.extraArgs["provider-id"] in the Talos
+// machineconfig. This causes kubelet to register the Node with the correct providerID,
+// allowing CAPI to match Machine → Node. Without this, CAPI can't find the Node
+// and the Machine stays in Failed phase.
+func injectProviderID(configData []byte, providerID string) ([]byte, error) {
+	if providerID == "" {
+		return configData, nil
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal config for providerID injection: %w", err)
+	}
+
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	kubelet, ok := machine["kubelet"].(map[string]interface{})
+	if !ok {
+		kubelet = make(map[string]interface{})
+		machine["kubelet"] = kubelet
+	}
+
+	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
+	if !ok {
+		extraArgs = make(map[string]interface{})
+		kubelet["extraArgs"] = extraArgs
+	}
+
+	extraArgs["provider-id"] = providerID
+	return yaml.Marshal(config)
+}
+
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
@@ -762,6 +798,16 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		}
 	}
 
+	// Inject providerID into kubelet extraArgs so the Node registers with the
+	// correct providerID. Without this, CAPI can't match Machine → Node and the
+	// Machine stays in Failed phase ("Waiting for a node with matching ProviderID").
+	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
+	bootstrapData, err = injectProviderID(bootstrapData, providerID)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("inject providerID into config: %w", err)
+	}
+	logger.Info("Injected providerID into machineconfig", "providerID", providerID)
+
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
 
 	applyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -771,8 +817,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("apply Talos config to %s: %w", serverIP, err)
 	}
 
-	// Set the providerID
-	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
+	// Set the providerID on the HRM spec (propagates to Machine via CAPI)
 	hrm.Spec.ProviderID = &providerID
 
 	// After apply-config, Talos reboots. We must wait for it to come back before bootstrapping.
