@@ -354,6 +354,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 				"serverID", serverID, "ip", serverIP)
 		}
 		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
@@ -373,6 +375,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
 			"serverID", serverID, "ip", serverIP)
 		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
@@ -496,18 +500,17 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 		logger.Info("Talos booted in full mode after install (old config persisted) — re-activating rescue to reinstall",
 			"serverID", serverID, "ip", serverIP)
 		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
-	// Edge case: if rescue SSH is reachable, the server booted back into rescue
-	// instead of Talos (e.g., rescue wasn't deactivated, or EFI boot order issue).
-	// Re-install Talos from rescue.
-	if sshrescue.IsReachable(serverIP) {
-		logger.Info("Server booted back into rescue after install — re-installing",
-			"serverID", serverID, "ip", serverIP)
-		hrm.Status.ProvisioningState = infrav1.StateInRescue
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-	}
+	// DO NOT check sshrescue.IsReachable() here. After stateInstallTalos sends the
+	// `reboot` command, the status patch triggers a watch event → immediate reconcile.
+	// SSH port 22 stays open for several seconds after `reboot` is issued (the SSH
+	// daemon hasn't shut down yet). Checking rescue SSH here would wrongly set
+	// state=InRescue → trigger reinstall on a half-rebooted server → SSH drops
+	// mid-wipe → state corruption. Only look for positive Talos signals.
 
 	// Still waiting for reboot — stay in StateInstalling until maintenance mode is detected
 	logger.Info("Waiting for Talos to boot (not yet in maintenance mode)", "ip", serverIP)
