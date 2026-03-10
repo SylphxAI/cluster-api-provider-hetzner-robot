@@ -95,6 +95,12 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	RetryCount int `json:"retryCount,omitempty"`
 
+	// LastRetryTimestamp is set each time RetryCount is incremented.
+	// Used to enforce backoff: status patches trigger watch events that bypass
+	// RequeueAfter, so the controller checks this timestamp to skip premature reconciles.
+	// +optional
+	LastRetryTimestamp *metav1.Time `json:"lastRetryTimestamp,omitempty"`
+
 	// Conditions provides observations of the operational state.
 	// +optional
 	Conditions clusterv1.Conditions `json:"conditions,omitempty"`

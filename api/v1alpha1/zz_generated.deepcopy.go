@@ -205,6 +205,10 @@ func (in *HetznerRobotMachineStatus) DeepCopyInto(out *HetznerRobotMachineStatus
 		*out = new(string)
 		**out = **in
 	}
+	if in.LastRetryTimestamp != nil {
+		in, out := &in.LastRetryTimestamp, &out.LastRetryTimestamp
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make(clusterv1.Conditions, len(*in))

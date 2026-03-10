@@ -115,11 +115,29 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// Enforce backoff: status patches trigger watch events that bypass RequeueAfter.
+	// If we're in a retry state, check that enough time has elapsed before retrying.
+	if hrm.Status.RetryCount > 0 && hrm.Status.LastRetryTimestamp != nil {
+		expectedBackoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
+		if expectedBackoff > 5*time.Minute {
+			expectedBackoff = 5 * time.Minute
+		}
+		elapsed := time.Since(hrm.Status.LastRetryTimestamp.Time)
+		if elapsed < expectedBackoff {
+			remaining := expectedBackoff - elapsed
+			logger.V(1).Info("Backoff not yet elapsed, skipping reconcile",
+				"retryCount", hrm.Status.RetryCount, "remaining", remaining)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
+
 	// Wrap reconcileNormal with retry counting → StateError on persistent failures.
 	// Uses exponential backoff: 30s, 60s, 120s, ... capped at 5 minutes.
 	result, err := r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
 	if err != nil {
 		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
 		msg := err.Error()
 		hrm.Status.FailureMessage = &msg
 		if hrm.Status.RetryCount >= infrav1.MaxProvisioningRetries {
@@ -145,6 +163,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Success: reset retry counter
 	hrm.Status.RetryCount = 0
 	hrm.Status.FailureMessage = nil
+	hrm.Status.LastRetryTimestamp = nil
 	return result, nil
 }
 
