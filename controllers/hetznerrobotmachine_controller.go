@@ -697,6 +697,37 @@ func injectSecretboxEncryptionSecret(configData []byte, secret string) ([]byte, 
 	return yaml.Marshal(config)
 }
 
+// injectServiceAccountKey overrides cluster.serviceAccount.key in the Talos machineconfig.
+// CABPT generates a unique SA key per Machine, but all CP nodes sharing etcd must use the
+// same key — otherwise API servers can't validate tokens signed by other CP nodes.
+// Workers are unaffected (they don't run kube-apiserver), but injecting consistently
+// ensures correctness if a worker is later promoted.
+func injectServiceAccountKey(configData []byte, saKey string) ([]byte, error) {
+	if saKey == "" {
+		return configData, nil
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal config for SA key injection: %w", err)
+	}
+
+	cluster, _ := config["cluster"].(map[string]interface{})
+	if cluster == nil {
+		cluster = make(map[string]interface{})
+		config["cluster"] = cluster
+	}
+
+	sa, _ := cluster["serviceAccount"].(map[string]interface{})
+	if sa == nil {
+		sa = make(map[string]interface{})
+		cluster["serviceAccount"] = sa
+	}
+
+	sa["key"] = saKey
+	return yaml.Marshal(config)
+}
+
 // injectProviderID sets machine.kubelet.extraArgs["provider-id"] in the Talos
 // machineconfig. This causes kubelet to register the Node with the correct providerID,
 // allowing CAPI to match Machine → Node. Without this, CAPI can't find the Node
@@ -781,20 +812,32 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"internalIP", internalIP)
 	}
 
-	// Inject the correct secretboxEncryptionSecret from the cluster-level Talos secret.
-	// CAPT may generate a different key per Machine, but all CP nodes sharing etcd must
-	// use the same encryption key. Without this, new CP nodes can't decrypt existing secrets.
+	// Inject cluster-level secrets from the Talos secret bundle.
+	// CABPT generates unique keys per Machine, but all CP nodes sharing etcd must
+	// use the same keys. Without this:
+	// - Different secretboxEncryptionSecret → new CP nodes can't decrypt existing K8s secrets
+	// - Different serviceAccount.key → API servers can't validate tokens signed by other CP nodes
 	if hrc.Spec.TalosSecretRef != nil {
-		encryptionSecret, err := r.getSecretboxEncryptionSecret(ctx, hrc)
+		bundle, err := r.getTalosSecretBundle(ctx, hrc)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("get secretbox encryption secret: %w", err)
+			return ctrl.Result{}, fmt.Errorf("get talos secret bundle: %w", err)
 		}
-		if encryptionSecret != "" {
-			bootstrapData, err = injectSecretboxEncryptionSecret(bootstrapData, encryptionSecret)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("inject secretbox encryption secret: %w", err)
+		if bundle != nil {
+			if s := bundle.Secrets.SecretboxEncryptionSecret; s != "" {
+				bootstrapData, err = injectSecretboxEncryptionSecret(bootstrapData, s)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("inject secretbox encryption secret: %w", err)
+				}
+				logger.Info("Injected secretboxEncryptionSecret from cluster talos secret")
 			}
-			logger.Info("Injected secretboxEncryptionSecret from cluster talos secret")
+
+			if s := bundle.Secrets.K8sServiceAccount.Key; s != "" {
+				bootstrapData, err = injectServiceAccountKey(bootstrapData, s)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("inject service account key: %w", err)
+				}
+				logger.Info("Injected serviceAccount.key from cluster talos secret")
+			}
 		}
 	}
 
@@ -1031,12 +1074,11 @@ func (r *HetznerRobotMachineReconciler) getBootstrapData(ctx context.Context, ma
 	return data, nil
 }
 
-// getSecretboxEncryptionSecret reads the correct secretboxEncryptionSecret from the
-// cluster-level Talos secret. The secret bundle is a YAML document with a
-// `secrets.secretboxencryptionsecret` field.
-func (r *HetznerRobotMachineReconciler) getSecretboxEncryptionSecret(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (string, error) {
+// getTalosSecretBundle reads and parses the Talos secret bundle from the cluster-level secret.
+// Returns nil if TalosSecretRef is not configured.
+func (r *HetznerRobotMachineReconciler) getTalosSecretBundle(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (*talosSecretBundle, error) {
 	if hrc.Spec.TalosSecretRef == nil {
-		return "", nil
+		return nil, nil
 	}
 
 	secret := &corev1.Secret{}
@@ -1045,25 +1087,30 @@ func (r *HetznerRobotMachineReconciler) getSecretboxEncryptionSecret(ctx context
 		ns = hrc.Namespace
 	}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: hrc.Spec.TalosSecretRef.Name}, secret); err != nil {
-		return "", fmt.Errorf("get talos secret %s/%s: %w", ns, hrc.Spec.TalosSecretRef.Name, err)
+		return nil, fmt.Errorf("get talos secret %s/%s: %w", ns, hrc.Spec.TalosSecretRef.Name, err)
 	}
 
 	bundle, ok := secret.Data["bundle"]
 	if !ok {
-		return "", fmt.Errorf("talos secret %s has no 'bundle' key", hrc.Spec.TalosSecretRef.Name)
+		return nil, fmt.Errorf("talos secret %s has no 'bundle' key", hrc.Spec.TalosSecretRef.Name)
 	}
 
-	// Parse the bundle YAML to extract secrets.secretboxencryptionsecret
-	var bundleData struct {
-		Secrets struct {
-			SecretboxEncryptionSecret string `yaml:"secretboxencryptionsecret"`
-		} `yaml:"secrets"`
-	}
+	var bundleData talosSecretBundle
 	if err := yaml.Unmarshal(bundle, &bundleData); err != nil {
-		return "", fmt.Errorf("parse talos secret bundle: %w", err)
+		return nil, fmt.Errorf("parse talos secret bundle: %w", err)
 	}
 
-	return bundleData.Secrets.SecretboxEncryptionSecret, nil
+	return &bundleData, nil
+}
+
+// talosSecretBundle represents the relevant fields from the Talos secret bundle.
+type talosSecretBundle struct {
+	Secrets struct {
+		SecretboxEncryptionSecret string `yaml:"secretboxencryptionsecret"`
+		K8sServiceAccount        struct {
+			Key string `yaml:"key"`
+		} `yaml:"k8sserviceaccount"`
+	} `yaml:"secrets"`
 }
 
 // buildRobotClient creates a Robot API client from the HRC's secret.
