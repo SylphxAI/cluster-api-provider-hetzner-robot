@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -127,106 +128,105 @@ func (c *Client) WipeAllDisks() (string, error) {
 // Caller must call WipeAllDisks() before this — InstallTalos only writes the image,
 // it does not wipe. Separation of concerns: wiping is a provisioning-level decision
 // (wipe everything), writing is install-level (target one specific disk).
+// craneVersion is the pinned version of crane used to extract OCI images.
+// Update periodically to pick up security fixes.
+const craneVersion = "v0.20.2"
+
+// InstallTalos installs Talos Linux on the server using the official Talos OCI installer.
+//
+// This is the correct, production-grade approach for bare metal Talos provisioning.
+// It uses the Talos installer binary (extracted from the Talos Factory OCI image)
+// rather than dd'ing a raw disk image followed by shell-based EFI manipulation.
+//
+// Why OCI installer > dd + efibootmgr:
+//
+//   - EFI correctness: Talos' own Go bootloader code handles UEFI NVRAM entries
+//     using go-efilib, which is type-safe and handles all UEFI firmware quirks
+//     (including Hetzner AX servers that don't do auto-discovery).
+//
+//   - Partition layout: installer creates the canonical Talos GPT layout
+//     (BIOS boot + EFI System + BOOT + META + STATE + A + B) with correct UUIDs.
+//
+//   - Disk zeroing: --zero flag handles secure wipe before partitioning.
+//
+//   - Maintenance mode: installer leaves the disk in a state where Talos
+//     boots directly into maintenance mode on first start, ready for
+//     machineconfig via talosctl apply-config --insecure.
+//
+//   - Future-proof: EFI handling and partition layout improvements in future
+//     Talos releases are automatically inherited without CAPHR code changes.
+//
+// Flow:
+//  1. Download crane (static OCI tool binary, ~15 MB)
+//  2. Export the Talos Factory installer OCI image as a tar archive
+//  3. Extract the `installer` binary from the tar
+//  4. Run: installer install --disk <disk> --zero --platform metal
+//
+// The installer reads machine config from stdin; passing /dev/null skips
+// config validation (allowed — node will be in maintenance mode on first boot).
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
-	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
-
-	// Download and write Talos image to disk.
-	// imageURL and disk are %q-quoted to prevent shell injection.
-	ddCmd := fmt.Sprintf(
-		"set -e; "+
-			"echo 'Downloading Talos image...'; "+
-			"curl -fsSL %[1]q | xzcat | dd of=%[2]q bs=4M status=progress; "+
-			"sync; "+
-			"echo 'Talos image written'",
-		imageURL, disk,
-	)
-
-	out, err := c.Run(ddCmd)
-	if err != nil {
-		return fmt.Errorf("install Talos image: %w\nOutput: %s", err, out)
+	// Derive the OCI registry hostname from factoryURL.
+	// https://factory.talos.dev → factory.talos.dev
+	registryHost := factoryURL
+	for _, prefix := range []string{"https://", "http://"} {
+		registryHost = strings.TrimPrefix(registryHost, prefix)
 	}
+	// OCI image: factory.talos.dev/installer/<schematic>:<version>
+	installerImage := fmt.Sprintf("%s/installer/%s:%s", registryHost, schematic, version)
 
-	// Re-read partition table so kernel sees the new GPT written by dd.
-	// Sleep 2s to let the kernel settle — some NVMe controllers are slow to
-	// register new partition nodes after partprobe.
-	if _, err := c.Run(fmt.Sprintf("partprobe %q 2>/dev/null || true; sleep 2; echo 'Partition table re-read'", disk)); err != nil {
-		// partprobe failure is non-fatal — kernel may already have the table
-		_ = err
-	}
-
-	// EFI boot entry setup — required on Hetzner AX bare metal.
-	//
-	// AX servers (AX162-R etc.) do NOT perform UEFI auto-discovery of new ESPs.
-	// Their default boot order is PXE-first. Without an explicit UEFI NVRAM entry
-	// for the Talos disk, the server will PXE-loop indefinitely after rescue exits,
-	// because PXE fails (rescue inactive) and there is no disk fallback entry.
-	//
-	// The previous concern about "invalid entries causing hangs" was about stale
-	// entries persisting across wipe cycles. We mitigate this by:
-	//   1. Deleting ALL existing 'Talos' NVRAM entries before creating a new one
-	//   2. Creating the entry AFTER dd so it always points to a valid GPT+ESP
-	//
-	// Boot order strategy: [Talos, ...existing entries (PXE preserved)]
-	//   - Talos boots normally after install ✅
-	//   - Hetzner rescue (PXE) still works for future re-provisions ✅
-	//     (rescue activation forces PXE for one boot only, overriding NVRAM order)
-	bootCmd := fmt.Sprintf(
+	// All values are %q-quoted to prevent shell injection.
+	installCmd := fmt.Sprintf(
 		"set -euo pipefail; "+
-			"TARGET_DISK=%q; "+
-			"echo 'Configuring EFI boot entry for Talos...'; "+
-			"if ! command -v efibootmgr &>/dev/null; then echo 'WARNING: efibootmgr not available, skipping'; exit 0; fi; "+
-			// Find EFI partition device path via lsblk (handles nvme0n1p1 and sda1 naming)
-			"EFI_PART_DEV=$(lsblk -lno NAME,FSTYPE \"${TARGET_DISK}\" 2>/dev/null | awk '$2==\"vfat\"{print \"/dev/\"$1}' | head -1 || true); "+
-			"if [ -z \"$EFI_PART_DEV\" ]; then "+
-			"  EFI_PART_DEV=$(blkid -o device \"${TARGET_DISK}\"* 2>/dev/null | while read dev; do blkid -s TYPE -o value \"$dev\" 2>/dev/null | grep -q vfat && echo \"$dev\"; done | head -1 || true); "+
-			"fi; "+
-			"if [ -z \"$EFI_PART_DEV\" ]; then "+
-			"  echo 'WARNING: Could not detect EFI partition, using default ${TARGET_DISK}p1'; "+
-			"  EFI_PART_DEV=\"${TARGET_DISK}p1\"; "+
-			"fi; "+
-			"EFI_PART_NUM=$(echo \"$EFI_PART_DEV\" | grep -oE '[0-9]+$'); "+
-			"echo \"EFI partition: ${EFI_PART_DEV} (part ${EFI_PART_NUM})\"; "+
-			// Mount EFI partition to find the Talos EFI binary path
-			"mkdir -p /tmp/efi_mount; "+
-			"EFI_LOADER='\\\\EFI\\\\boot\\\\bootx64.efi'; "+
-			"if mount \"${EFI_PART_DEV}\" /tmp/efi_mount 2>/dev/null; then "+
-			"  TALOS_EFI=$(find /tmp/efi_mount/EFI/Linux -maxdepth 1 -iname 'Talos-*.efi' 2>/dev/null | sort | tail -1); "+
-			"  if [ -n \"$TALOS_EFI\" ]; then "+
-			"    REL=${TALOS_EFI#/tmp/efi_mount}; "+
-			"    EFI_LOADER=$(echo \"$REL\" | sed 's|/|\\\\\\\\|g'); "+
-			"    echo \"Talos EFI binary: $TALOS_EFI -> $EFI_LOADER\"; "+
-			"  else "+
-			"    echo \"Talos-*.efi not found, using fallback: $EFI_LOADER\"; "+
-			"  fi; "+
-			"  umount /tmp/efi_mount; "+
-			"else "+
-			"  echo \"WARNING: Could not mount ${EFI_PART_DEV}, using fallback loader\"; "+
-			"fi; "+
-			// Preserve existing boot order (PXE entries etc.)
-			"OLD_ORDER=$(efibootmgr | grep '^BootOrder:' | awk '{print $2}' | tr ',' ' '); "+
-			// Remove stale Talos entries from previous provisions to avoid UEFI hangs
-			"for NUM in $(efibootmgr | grep -i 'talos' | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/' || true); do "+
-			"  echo \"Removing stale entry: Boot${NUM}\"; efibootmgr -b \"$NUM\" -B || true; "+
-			"done; "+
-			// Create new entry
-			"echo \"Creating: disk=${TARGET_DISK} part=${EFI_PART_NUM} loader=${EFI_LOADER}\"; "+
-			"CREATE_OUT=$(efibootmgr -c -d \"${TARGET_DISK}\" -p \"${EFI_PART_NUM}\" -L 'Talos' -l \"${EFI_LOADER}\" 2>&1); "+
-			"echo \"efibootmgr output: $CREATE_OUT\"; "+
-			"NEW_ENTRY=$(echo \"$CREATE_OUT\" | grep 'Boot[0-9A-Fa-f].*\\* Talos' | head -1 | sed 's/Boot\\([0-9A-Fa-f]*\\).*/\\1/'); "+
-			"if [ -z \"$NEW_ENTRY\" ]; then "+
-			"  echo 'ERROR: efibootmgr create failed — server will PXE-loop'; efibootmgr; exit 1; "+
-			"fi; "+
-			// Set boot order: Talos first, PXE preserved
-			"NEW_ORDER=$(echo \"$NEW_ENTRY $(echo $OLD_ORDER | tr ' ' '\\n' | grep -iv \"$NEW_ENTRY\" | tr '\\n' ' ')\" | xargs | tr ' ' ','); "+
-			"efibootmgr -o \"$NEW_ORDER\"; "+
-			"echo \"SUCCESS: boot order=$NEW_ORDER\"; efibootmgr",
-		disk,
+
+			// ── Step 1: Download crane ────────────────────────────────────────────
+			// crane is a small (~15 MB) static Go binary for working with OCI images.
+			// We use it to pull and export the Talos installer OCI image without
+			// needing Docker/podman in rescue mode.
+			"echo '=== Step 1: Downloading crane OCI tool ==='; "+
+			"CRANE_URL=\"https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz\"; "+
+			"curl -fsSL \"${CRANE_URL}\" | tar xz -C /tmp crane; "+
+			"chmod +x /tmp/crane; "+
+			"/tmp/crane version; "+
+
+			// ── Step 2: Export installer OCI image ───────────────────────────────
+			// crane export streams the image layers into a single tar archive.
+			// The archive contains the installer binary at /installer (static binary).
+			"echo '=== Step 2: Extracting Talos installer from OCI image ==='; "+
+			"echo 'Image: %s'; "+
+			"/tmp/crane export %q /tmp/talos-installer.tar; "+
+			"tar xOf /tmp/talos-installer.tar installer > /tmp/talos-installer; "+
+			"chmod +x /tmp/talos-installer; "+
+			"echo 'Talos installer binary extracted successfully'; "+
+			"rm -f /tmp/talos-installer.tar; "+ // free disk space
+
+			// ── Step 3: Run Talos installer ──────────────────────────────────────
+			// installer install handles:
+			//   • Partition table creation (GPT: BIOS boot, EFI, BOOT, META, STATE, A, B)
+			//   • Kernel + initramfs writing to A partition
+			//   • EFI boot entry registration via Go go-efilib (UEFI NVRAM)
+			//   • --zero: zeroes disk before partitioning (belt-and-suspenders
+			//     after WipeAllDisks, ensures no stale BlueStore/filesystem sigs)
+			//   • stdin /dev/null: no machine config at install time; node boots
+			//     into Talos maintenance mode where CAPHR will apply machineconfig
+			"echo '=== Step 3: Running Talos installer ==='; "+
+			"echo 'Disk: %s | Platform: metal | Zero: yes'; "+
+			"/tmp/talos-installer install "+
+			"  --disk %q "+
+			"  --zero "+
+			"  --platform metal "+
+			"  < /dev/null; "+
+			"echo '=== Talos installation complete ==='",
+
+		craneVersion,    // crane release version
+		installerImage,  // log: OCI image being pulled
+		installerImage,  // crane export argument
+		disk,            // log: target disk
+		disk,            // --disk argument
 	)
 
-	if out, err := c.Run(bootCmd); err != nil {
-		// EFI setup failure is a hard error: without a valid UEFI boot entry,
-		// the server will PXE-loop and never reach Talos maintenance mode.
-		return fmt.Errorf("EFI boot entry setup failed (server will PXE-loop): %w\nOutput:\n%s", err, out)
+	out, err := c.Run(installCmd)
+	if err != nil {
+		return fmt.Errorf("Talos OCI installer failed on %s: %w\nOutput:\n%s", disk, err, out)
 	}
 
 	return nil
