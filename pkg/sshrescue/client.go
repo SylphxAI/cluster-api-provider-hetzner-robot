@@ -176,7 +176,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 
 	// All values are %q-quoted to prevent shell injection.
 	installCmd := fmt.Sprintf(
-		"set -euo pipefail; "+
+		"set -eu; "+ // dash (rescue /bin/sh) does not support pipefail
 
 			// ── Step 1: Download crane ────────────────────────────────────────────
 			// crane is a small (~15 MB) static Go binary for working with OCI images.
