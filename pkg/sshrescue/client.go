@@ -208,6 +208,24 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("talos installer: %w\nOutput: %s", err, out)
 	}
 
+	// Step 4: Fix EFI boot order from rescue (outside chroot/unshare)
+	// The installer creates a Talos UKI boot entry via go-efilib inside
+	// unshare, but the BootOrder update may not persist through the mount
+	// namespace. Explicitly set the Talos entry first using efibootmgr
+	// from rescue, where efivarfs access is direct to UEFI NVRAM.
+	efiCmd := `TALOS=$(efibootmgr 2>/dev/null | grep -i "Talos" | head -1 | sed 's/Boot\([0-9A-Fa-f]*\).*/\1/'); ` +
+		`if [ -n "$TALOS" ]; then ` +
+		`CURRENT=$(efibootmgr | grep BootOrder | awk '{print $2}'); ` +
+		`efibootmgr -o "$TALOS,$CURRENT" 2>&1; ` +
+		`echo "EFI boot order set: Talos ($TALOS) first"; ` +
+		`else ` +
+		`echo "WARN: No Talos boot entry found in efibootmgr, relying on UEFI fallback"; ` +
+		`fi`
+	if out, err := c.Run(efiCmd); err != nil {
+		// Non-fatal: UEFI fallback boot path may still work
+		_ = out
+	}
+
 	// Cleanup: OCI filesystem + crane binary (rescue is RAM-based)
 	_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
 
