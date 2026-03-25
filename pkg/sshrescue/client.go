@@ -204,7 +204,8 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	}
 
 	// Step 3: Extract installer binary from tar
-	if out, err := c.Run("tar xOf /tmp/talos-installer.tar installer > /tmp/talos-installer && chmod +x /tmp/talos-installer && rm -f /tmp/talos-installer.tar"); err != nil {
+	// The installer is at usr/bin/installer inside the OCI image filesystem
+	if out, err := c.Run("tar xOf /tmp/talos-installer.tar usr/bin/installer > /tmp/talos-installer && chmod +x /tmp/talos-installer && rm -f /tmp/talos-installer.tar"); err != nil {
 		return fmt.Errorf("extract installer: %w\nOutput: %s", err, out)
 	}
 
