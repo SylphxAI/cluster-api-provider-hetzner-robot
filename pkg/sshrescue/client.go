@@ -198,7 +198,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 			"echo talos.platform=metal > /tmp/talos-root/proc/cmdline && "+
 			"mkdir -p /tmp/talos-root/proc/self && "+
 			"echo talos.platform=metal > /tmp/talos-root/proc/self/cmdline && "+
-			"chroot /tmp/talos-root /usr/bin/installer install --disk %q --force --platform metal < /dev/null"+
+			"chroot /tmp/talos-root /usr/bin/installer install --disk %q --force --zero --platform metal < /dev/null"+
 			"'",
 		disk,
 	)
