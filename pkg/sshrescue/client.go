@@ -180,73 +180,52 @@ const craneVersion = "v0.20.2"
 // config validation (allowed — node will be in maintenance mode on first boot).
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
 	// Derive the OCI registry hostname from factoryURL.
-	// https://factory.talos.dev → factory.talos.dev
 	registryHost := factoryURL
 	for _, prefix := range []string{"https://", "http://"} {
 		registryHost = strings.TrimPrefix(registryHost, prefix)
 	}
-	// OCI image: factory.talos.dev/installer/<schematic>:<version>
 	installerImage := fmt.Sprintf("%s/installer/%s:%s", registryHost, schematic, version)
 
-	// All values are %q-quoted to prevent shell injection.
+	// Step 1: Download crane — lightweight OCI tool for pulling images without Docker
+	craneURL := fmt.Sprintf("https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz", craneVersion)
+	if out, err := c.Run(fmt.Sprintf(
+		"curl -fsSL %q -o /tmp/crane.tar.gz && tar xzf /tmp/crane.tar.gz -C /tmp crane && rm -f /tmp/crane.tar.gz && chmod +x /tmp/crane && /tmp/crane version",
+		craneURL,
+	)); err != nil {
+		return fmt.Errorf("download crane: %w\nOutput: %s", err, out)
+	}
+
+	// Step 2: Export Talos installer from OCI image
+	if out, err := c.Run(fmt.Sprintf(
+		"/tmp/crane export --platform linux/amd64 %q /tmp/talos-installer.tar",
+		installerImage,
+	)); err != nil {
+		return fmt.Errorf("crane export %s: %w\nOutput: %s", installerImage, err, out)
+	}
+
+	// Step 3: Extract installer binary from tar
+	if out, err := c.Run("tar xOf /tmp/talos-installer.tar installer > /tmp/talos-installer && chmod +x /tmp/talos-installer && rm -f /tmp/talos-installer.tar"); err != nil {
+		return fmt.Errorf("extract installer: %w\nOutput: %s", err, out)
+	}
+
+	// Step 4: Run Talos installer
 	installCmd := fmt.Sprintf(
-		"set -eu; "+ // dash (rescue /bin/sh) does not support pipefail
-
-			// ── Step 1: Download crane ────────────────────────────────────────────
-			// crane is a small (~15 MB) static Go binary for working with OCI images.
-			// We use it to pull and export the Talos installer OCI image without
-			// needing Docker/podman in rescue mode.
-			"echo '=== Step 1: Downloading crane OCI tool ==='; "+
-			"CRANE_URL=\"https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz\"; "+
-			"curl -fsSL \"${CRANE_URL}\" -o /tmp/crane.tar.gz; "+
-			"tar xz -C /tmp crane -f /tmp/crane.tar.gz; "+
-			"rm -f /tmp/crane.tar.gz; "+
-			"chmod +x /tmp/crane; "+
-			"/tmp/crane version; "+
-
-			// ── Step 2: Export installer OCI image ───────────────────────────────
-			// crane export streams the image layers into a single tar archive.
-			// The archive contains the installer binary at /installer (static binary).
-			"echo '=== Step 2: Extracting Talos installer from OCI image ==='; "+
-			"echo 'Image: %s'; "+
-			"/tmp/crane export --platform linux/amd64 %q /tmp/talos-installer.tar 2>&1; "+
-			"tar xOf /tmp/talos-installer.tar installer > /tmp/talos-installer; "+
-			"chmod +x /tmp/talos-installer; "+
-			"echo 'Talos installer binary extracted successfully'; "+
-			"rm -f /tmp/talos-installer.tar; "+ // free disk space
-
-			// ── Step 3: Run Talos installer ──────────────────────────────────────
-			// installer install handles:
-			//   • Partition table creation (GPT: BIOS boot, EFI, BOOT, META, STATE, A, B)
-			//   • Kernel + initramfs writing to A partition
-			//   • EFI boot entry registration via Go go-efilib (UEFI NVRAM)
-			//   • --zero: zeroes disk before partitioning (belt-and-suspenders
-			//     after WipeAllDisks, ensures no stale BlueStore/filesystem sigs)
-			//   • stdin /dev/null: no machine config at install time; node boots
-			//     into Talos maintenance mode where CAPHR will apply machineconfig
-			"echo '=== Step 3: Running Talos installer ==='; "+
-			"echo 'Disk: %s | Platform: metal | Zero: yes'; "+
-			"/tmp/talos-installer install "+
-			"  --disk %q "+
-			"  --zero "+
-			"  --platform metal "+
-			"  < /dev/null; "+
-			"echo '=== Talos installation complete ==='",
-
-		craneVersion,    // crane release version
-		installerImage,  // log: OCI image being pulled
-		installerImage,  // crane export argument
-		disk,            // log: target disk
-		disk,            // --disk argument
+		"/tmp/talos-installer install --disk %q --zero --platform metal < /dev/null",
+		disk,
 	)
-
-	out, err := c.Run(installCmd)
-	if err != nil {
-		return fmt.Errorf("Talos OCI installer failed on %s: %w\nOutput:\n%s", disk, err, out)
+	if out, err := c.Run(installCmd); err != nil {
+		return fmt.Errorf("talos installer: %w\nOutput: %s", err, out)
 	}
 
 	return nil
 }
+
+// Replaced single compound command with separate steps for reliable
+// error isolation. Each step runs in its own SSH session via Run().
+// Previous compound command (`set -eu; step1; step2; step3`) failed
+// silently with exit code 2 when run through Go's x/crypto/ssh,
+// despite working fine through OpenSSH — likely due to shell quoting
+// or buffering differences in the SSH exec channel.
 
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
 // Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.
