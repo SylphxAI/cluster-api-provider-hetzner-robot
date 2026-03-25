@@ -203,15 +203,17 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("crane export %s: %w\nOutput: %s", installerImage, err, out)
 	}
 
-	// Step 3: Extract installer binary from tar
-	// The installer is at usr/bin/installer inside the OCI image filesystem
-	if out, err := c.Run("tar xOf /tmp/talos-installer.tar usr/bin/installer > /tmp/talos-installer && chmod +x /tmp/talos-installer && rm -f /tmp/talos-installer.tar"); err != nil {
+	// Step 3: Extract full OCI image filesystem and run installer
+	// The Talos installer at usr/bin/installer needs boot assets from
+	// usr/install/amd64/ (kernel, systemd-boot). Extract everything to
+	// /tmp/talos-root and run installer from there.
+	if out, err := c.Run("mkdir -p /tmp/talos-root && tar xf /tmp/talos-installer.tar -C /tmp/talos-root && rm -f /tmp/talos-installer.tar && chmod +x /tmp/talos-root/usr/bin/installer"); err != nil {
 		return fmt.Errorf("extract installer: %w\nOutput: %s", err, out)
 	}
 
-	// Step 4: Run Talos installer
+	// Step 4: Run Talos installer with correct root for boot assets
 	installCmd := fmt.Sprintf(
-		"/tmp/talos-installer install --disk %q --zero --platform metal < /dev/null",
+		"cd /tmp/talos-root && ./usr/bin/installer install --disk %q --zero --platform metal < /dev/null",
 		disk,
 	)
 	if out, err := c.Run(installCmd); err != nil {
