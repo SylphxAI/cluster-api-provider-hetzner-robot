@@ -104,44 +104,31 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// WipeAllDisks discovers all non-removable block devices and wipes them.
-// This ensures a clean slate for provisioning — no leftover partition tables,
-// BlueStore labels, or filesystem metadata from previous installations.
-// Bare metal provisioning = every disk must be clean. Rook-Ceph, for example,
-// refuses to provision OSDs on disks with existing BlueStore signatures.
-// Without this, every new node requires manual `blkdiscard` — unacceptable.
-func (c *Client) WipeAllDisks() (string, error) {
-	// Discover all non-removable, non-loop block devices (whole disks only).
-	// lsblk -dnpo NAME,TYPE,RM outputs: /dev/nvme0n1 disk 0
-	// Filters: TYPE=disk (no partitions), RM=0 (not removable/USB).
-	cmd := `set -e; ` +
-		`echo 'Discovering block devices...'; ` +
-		`lsblk -dnpo NAME,TYPE,RM > /tmp/lsblk.out; ` +
-		`DISKS=$(awk '$2 == "disk" && $3 == "0" { print $1 }' /tmp/lsblk.out); ` +
-		`rm -f /tmp/lsblk.out; ` +
-		`if [ -z "$DISKS" ]; then echo 'No disks found to wipe'; exit 0; fi; ` +
-		`for disk in $DISKS; do ` +
-		`echo "Wiping $disk..."; ` +
-		`if blkdiscard "$disk" 2>/dev/null; then ` +
-		`echo "  $disk wiped via blkdiscard (TRIM)"; ` +
-		`else ` +
-		`echo "  blkdiscard unavailable for $disk, falling back to dd zero (2GB)"; ` +
-		`dd if=/dev/zero of="$disk" bs=1M count=2048 conv=notrunc 2>/dev/null; ` +
-		`fi; ` +
-		`done; ` +
-		`sync; ` +
-		`echo "All disks wiped"`
+// WipeOSDisk wipes only the OS install disk, leaving all other disks untouched.
+// During reprovision, Ceph OSD data on other disks (e.g. nvme1n1) must survive —
+// wiping them would destroy storage cluster data and force a full rebuild.
+// Only the OS disk needs a clean slate for Talos installation.
+//
+// Uses blkdiscard (fast TRIM) with dd fallback (zero first 2GB) to clear
+// partition tables, filesystem metadata, and any leftover signatures.
+func (c *Client) WipeOSDisk(disk string) (string, error) {
+	cmd := fmt.Sprintf(
+		`set -e; `+
+			`echo "Wiping OS disk %[1]s..."; `+
+			`if blkdiscard %[1]q 2>/dev/null; then `+
+			`echo "  %[1]s wiped via blkdiscard (TRIM)"; `+
+			`else `+
+			`echo "  blkdiscard unavailable for %[1]s, falling back to dd zero (2GB)"; `+
+			`dd if=/dev/zero of=%[1]q bs=1M count=2048 conv=notrunc 2>/dev/null; `+
+			`fi; `+
+			`sync; `+
+			`echo "OS disk %[1]s wiped"`,
+		disk,
+	)
 
 	return c.Run(cmd)
 }
 
-// InstallTalos installs Talos Linux on the server.
-// It downloads the Talos raw disk image from Talos factory and writes it to the disk.
-// Then sets the boot order to boot from the disk.
-//
-// Caller must call WipeAllDisks() before this — InstallTalos only writes the image,
-// it does not wipe. Separation of concerns: wiping is a provisioning-level decision
-// (wipe everything), writing is install-level (target one specific disk).
 // InstallTalos installs Talos Linux on the server using the official OCI
 // installer binary inside a minimal namespace created by unshare(1).
 //
@@ -200,7 +187,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	//   - /sys: --rbind host sysfs (not mount -t sysfs) so go-efilib can access
 	//     /sys/firmware/efi/efivars for UEFI NVRAM boot entry creation
 	//   - /dev: --rbind host devtmpfs for block device access
-	//   - --force: required because WipeAllDisks uses blkdiscard (not partition delete),
+	//   - --force: required because WipeOSDisk uses blkdiscard (not partition delete),
 	//     so the disk may still have partition metadata that blocks mkfs
 	installCmd := fmt.Sprintf(
 		"unshare --mount --pid --fork -- bash -c '"+

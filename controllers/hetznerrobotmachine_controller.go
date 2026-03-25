@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -426,25 +427,23 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	defer sshClient.Close()
 
-	// Wipe ALL disks — not just the install disk. Bare metal provisioning means
-	// clean slate. Without this, data disks retain old BlueStore/filesystem metadata
-	// and storage operators (Rook-Ceph) refuse to provision them, requiring manual
-	// intervention on every new node.
-	logger.Info("Wiping all disks on server", "ip", serverIP)
-	if out, err := sshClient.WipeAllDisks(); err != nil {
-		return ctrl.Result{}, fmt.Errorf("wipe all disks on %s: %w\nOutput: %s", serverIP, err, out)
+	installDisk := hrm.Spec.InstallDisk
+	if installDisk == "" {
+		installDisk = "/dev/nvme0n1"
+	}
+
+	// Wipe only the OS install disk — Ceph OSD data on other disks must survive
+	// reprovision. Wiping all disks would destroy storage cluster data.
+	logger.Info("Wiping OS disk on server", "ip", serverIP, "disk", installDisk)
+	if out, err := sshClient.WipeOSDisk(installDisk); err != nil {
+		return ctrl.Result{}, fmt.Errorf("wipe OS disk %s on %s: %w\nOutput: %s", installDisk, serverIP, err, out)
 	} else {
-		logger.Info("All disks wiped", "ip", serverIP, "output", out)
+		logger.Info("OS disk wiped", "ip", serverIP, "disk", installDisk, "output", out)
 	}
 
 	factoryURL := hrc.Spec.TalosFactoryBaseURL
 	if factoryURL == "" {
 		factoryURL = talosFactoryDefaultBaseURL
-	}
-
-	installDisk := hrm.Spec.InstallDisk
-	if installDisk == "" {
-		installDisk = "/dev/nvme0n1"
 	}
 
 	if err := sshClient.InstallTalos(
@@ -672,6 +671,39 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 	return yaml.Marshal(config)
 }
 
+// injectHostname sets machine.network.hostname in the Talos machineconfig.
+// The hostname is derived from the VLAN internal IP: dots replaced with dashes,
+// prefixed with "talos-". Example: "10.10.0.3" → "talos-10-10-0-3".
+// This ensures the Kubernetes node name is deterministic across reprovisions,
+// since Talos uses this hostname as the kubelet node name.
+func injectHostname(configData []byte, internalIP string) ([]byte, error) {
+	if internalIP == "" {
+		return configData, nil
+	}
+
+	hostname := "talos-" + strings.ReplaceAll(internalIP, ".", "-")
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal machineconfig for hostname injection: %w", err)
+	}
+
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	network, ok := machine["network"].(map[string]interface{})
+	if !ok {
+		network = make(map[string]interface{})
+		machine["network"] = network
+	}
+
+	network["hostname"] = hostname
+	return yaml.Marshal(config)
+}
+
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig.
 // Ensures the parent interface has dhcp: true (to preserve public IP) and adds
 // the VLAN with the host's internal IP address.
@@ -891,6 +923,17 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"vlanID", hrc.Spec.VLANConfig.ID,
 			"interface", hrc.Spec.VLANConfig.Interface,
 			"internalIP", internalIP)
+	}
+
+	// Inject deterministic hostname derived from the VLAN internal IP.
+	// This ensures the K8s node name is stable across reprovisions:
+	// "10.10.0.3" → "talos-10-10-0-3". Skipped if no VLAN / internalIP.
+	if internalIP := hrh.Spec.InternalIP; internalIP != "" {
+		bootstrapData, err = injectHostname(bootstrapData, internalIP)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
+		}
+		logger.Info("Injected hostname into machineconfig", "hostname", "talos-"+strings.ReplaceAll(internalIP, ".", "-"))
 	}
 
 	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
