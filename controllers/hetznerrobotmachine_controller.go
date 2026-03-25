@@ -135,21 +135,23 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	// - Transient errors → exponential backoff with no max limit (SSH, API, network failures)
 	result, err := r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
 	if err != nil {
-		msg := err.Error()
-		hrm.Status.FailureMessage = &msg
-
 		if isPermanentError(err) {
 			// Terminal failure: unrecoverable configuration or resource issue.
-			logger.Error(err, "Permanent error, entering terminal StateError",
-				"state", hrm.Status.ProvisioningState)
+			// Set FailureMessage + FailureReason → CAPI marks Machine as Failed.
+			msg := err.Error()
+			hrm.Status.FailureMessage = &msg
 			reason := "PermanentError"
 			hrm.Status.FailureReason = &reason
 			hrm.Status.ProvisioningState = infrav1.StateError
 			hrm.Status.Ready = false
+			logger.Error(err, "Permanent error, entering terminal StateError",
+				"state", hrm.Status.ProvisioningState)
 			return ctrl.Result{}, nil
 		}
 
 		// Transient error: retry with exponential backoff, no max limit.
+		// Do NOT set FailureMessage — CAPI interprets it as terminal failure
+		// and marks the Machine as Failed. Transient errors are logged only.
 		hrm.Status.RetryCount++
 		now := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now
