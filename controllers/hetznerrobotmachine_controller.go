@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -119,10 +120,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Enforce backoff: status patches trigger watch events that bypass RequeueAfter.
 	// If we're in a retry state, check that enough time has elapsed before retrying.
 	if hrm.Status.RetryCount > 0 && hrm.Status.LastRetryTimestamp != nil {
-		expectedBackoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
-		if expectedBackoff > 5*time.Minute {
-			expectedBackoff = 5 * time.Minute
-		}
+		expectedBackoff := computeBackoff(hrm.Status.RetryCount)
 		elapsed := time.Since(hrm.Status.LastRetryTimestamp.Time)
 		if elapsed < expectedBackoff {
 			remaining := expectedBackoff - elapsed
@@ -132,40 +130,91 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
-	// Wrap reconcileNormal with retry counting → StateError on persistent failures.
-	// Uses exponential backoff: 30s, 60s, 120s, ... capped at 5 minutes.
+	// Wrap reconcileNormal with error classification:
+	// - Permanent errors → terminal StateError immediately (config issues, missing resources)
+	// - Transient errors → exponential backoff with no max limit (SSH, API, network failures)
 	result, err := r.reconcileNormal(ctx, hrm, hrc, machine, cluster)
 	if err != nil {
-		hrm.Status.RetryCount++
-		now := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now
 		msg := err.Error()
 		hrm.Status.FailureMessage = &msg
-		if hrm.Status.RetryCount >= infrav1.MaxProvisioningRetries {
-			// Terminal failure: max retries exceeded → MHC remediation or manual deletion.
-			logger.Error(err, "Max provisioning retries exceeded, entering terminal StateError",
-				"retries", hrm.Status.RetryCount,
+
+		if isPermanentError(err) {
+			// Terminal failure: unrecoverable configuration or resource issue.
+			logger.Error(err, "Permanent error, entering terminal StateError",
 				"state", hrm.Status.ProvisioningState)
-			reason := "MaxProvisioningRetriesExceeded"
+			reason := "PermanentError"
 			hrm.Status.FailureReason = &reason
 			hrm.Status.ProvisioningState = infrav1.StateError
 			hrm.Status.Ready = false
 			return ctrl.Result{}, nil
 		}
-		// Exponential backoff: 30s × 2^(retryCount-1), max 5 min
-		backoff := 30 * time.Second * (1 << (hrm.Status.RetryCount - 1))
-		if backoff > 5*time.Minute {
-			backoff = 5 * time.Minute
-		}
-		logger.Info("Reconcile error, backing off before retry",
-			"error", err.Error(), "retryCount", hrm.Status.RetryCount, "backoff", backoff)
+
+		// Transient error: retry with exponential backoff, no max limit.
+		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
+		backoff := computeBackoff(hrm.Status.RetryCount)
+		logger.Info("Transient error, will retry",
+			"retryCount", hrm.Status.RetryCount, "backoff", backoff, "error", err.Error())
 		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
 	// Success: reset retry counter
 	hrm.Status.RetryCount = 0
 	hrm.Status.FailureMessage = nil
+	hrm.Status.FailureReason = nil
 	hrm.Status.LastRetryTimestamp = nil
 	return result, nil
+}
+
+// isPermanentError returns true for errors that indicate an unrecoverable configuration
+// or resource issue. These errors will never resolve through retrying — they require
+// human intervention (fix config, add hosts to pool, create missing secrets).
+// All other errors (SSH failures, API timeouts, connection refused, crane/installer
+// failures) are treated as transient and will be retried indefinitely with backoff.
+func isPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+
+	// No hosts available in the pool — requires adding HetznerRobotHost resources
+	if strings.Contains(msg, "no available hetznerrobothost found") {
+		return true
+	}
+
+	// Config parsing/validation errors — bad YAML, invalid structure
+	if strings.Contains(msg, "unmarshal") || strings.Contains(msg, "invalid") {
+		return true
+	}
+
+	// Missing bootstrap data secret — CAPI hasn't created it, or it was deleted
+	if strings.Contains(msg, "secret") && strings.Contains(msg, "not found") {
+		return true
+	}
+
+	// Missing required spec fields
+	if strings.Contains(msg, "must specify either") {
+		return true
+	}
+
+	return false
+}
+
+// computeBackoff calculates exponential backoff: 30s * 2^(retryCount-1), capped at 5 minutes.
+func computeBackoff(retryCount int) time.Duration {
+	exp := retryCount - 1
+	if exp < 0 {
+		exp = 0
+	}
+	// Cap the exponent to avoid overflow — 2^10 * 30s = 30720s >> 5min cap anyway
+	if exp > 10 {
+		exp = 10
+	}
+	backoff := 30 * time.Second * time.Duration(math.Pow(2, float64(exp)))
+	if backoff > 5*time.Minute {
+		backoff = 5 * time.Minute
+	}
+	return backoff
 }
 
 func (r *HetznerRobotMachineReconciler) reconcileNormal(

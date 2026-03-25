@@ -238,8 +238,9 @@ spec:
                 type: boolean
               retryCount:
                 description: |-
-                  RetryCount tracks consecutive reconciliation errors for the current state.
-                  Reset to 0 on success. Enters terminal StateError at MaxProvisioningRetries.
+                  RetryCount tracks consecutive transient reconciliation errors for the current state.
+                  Reset to 0 on success. Used for exponential backoff calculation.
+                  Only permanent errors (config issues, missing resources) enter terminal StateError.
                 type: integer
             type: object
         type: object

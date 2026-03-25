@@ -8,10 +8,6 @@ import (
 
 const (
 	MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
-
-	// MaxProvisioningRetries is the maximum number of consecutive errors before
-	// entering terminal StateError. Recovery via MachineHealthCheck or manual deletion.
-	MaxProvisioningRetries = 10
 )
 
 // ProvisioningState represents the current state of the machine provisioning.
@@ -90,8 +86,9 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
 
-	// RetryCount tracks consecutive reconciliation errors for the current state.
-	// Reset to 0 on success. Enters terminal StateError at MaxProvisioningRetries.
+	// RetryCount tracks consecutive transient reconciliation errors for the current state.
+	// Reset to 0 on success. Used for exponential backoff calculation.
+	// Only permanent errors (config issues, missing resources) enter terminal StateError.
 	// +optional
 	RetryCount int `json:"retryCount,omitempty"`
 
