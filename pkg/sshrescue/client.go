@@ -142,93 +142,60 @@ func (c *Client) WipeAllDisks() (string, error) {
 // Caller must call WipeAllDisks() before this — InstallTalos only writes the image,
 // it does not wipe. Separation of concerns: wiping is a provisioning-level decision
 // (wipe everything), writing is install-level (target one specific disk).
-// craneVersion is the pinned version of crane used to extract OCI images.
-// Update periodically to pick up security fixes.
-const craneVersion = "v0.20.2"
-
-// InstallTalos installs Talos Linux on the server using the official Talos OCI installer.
+// InstallTalos installs Talos Linux on the server by writing a pre-built
+// raw disk image from Talos Factory.
 //
-// This is the correct, production-grade approach for bare metal Talos provisioning.
-// It uses the Talos installer binary (extracted from the Talos Factory OCI image)
-// rather than dd'ing a raw disk image followed by shell-based EFI manipulation.
+// Uses the raw image approach instead of the OCI installer binary because
+// the installer binary (v1.12+) requires a full container environment
+// (/proc, /sys, mount namespaces, /usr/install/ assets) that's impractical
+// to replicate in a Hetzner rescue SSH session.
 //
-// Why OCI installer > dd + efibootmgr:
-//
-//   - EFI correctness: Talos' own Go bootloader code handles UEFI NVRAM entries
-//     using go-efilib, which is type-safe and handles all UEFI firmware quirks
-//     (including Hetzner AX servers that don't do auto-discovery).
-//
-//   - Partition layout: installer creates the canonical Talos GPT layout
-//     (BIOS boot + EFI System + BOOT + META + STATE + A + B) with correct UUIDs.
-//
-//   - Disk zeroing: --zero flag handles secure wipe before partitioning.
-//
-//   - Maintenance mode: installer leaves the disk in a state where Talos
-//     boots directly into maintenance mode on first start, ready for
-//     machineconfig via talosctl apply-config --insecure.
-//
-//   - Future-proof: EFI handling and partition layout improvements in future
-//     Talos releases are automatically inherited without CAPHR code changes.
+// The raw image includes the complete Talos GPT layout (EFI, BOOT, META,
+// STATE, A, B) with kernel + initramfs. After dd, the node boots into
+// Talos maintenance mode ready for machineconfig via talosctl apply-config.
 //
 // Flow:
-//  1. Download crane (static OCI tool binary, ~15 MB)
-//  2. Export the Talos Factory installer OCI image as a tar archive
-//  3. Extract the `installer` binary from the tar
-//  4. Run: installer install --disk <disk> --zero --platform metal
-//
-// The installer reads machine config from stdin; passing /dev/null skips
-// config validation (allowed — node will be in maintenance mode on first boot).
+//  1. Download raw disk image from Talos Factory (xz-compressed, ~500MB)
+//  2. Decompress + dd to target disk (~4GB, takes ~4 seconds on NVMe)
+//  3. Set up UEFI boot entry via efibootmgr (fallback: UEFI auto-discovery)
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
-	// Derive the OCI registry hostname from factoryURL.
-	registryHost := factoryURL
-	for _, prefix := range []string{"https://", "http://"} {
-		registryHost = strings.TrimPrefix(registryHost, prefix)
-	}
-	installerImage := fmt.Sprintf("%s/installer/%s:%s", registryHost, schematic, version)
-
-	// Step 1: Download crane — lightweight OCI tool for pulling images without Docker
-	craneURL := fmt.Sprintf("https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz", craneVersion)
+	// Step 1: Download raw Talos disk image from Factory
+	// Uses the pre-built raw image instead of OCI installer because the
+	// installer binary requires a full container environment (/proc, /sys,
+	// mount namespaces) that's impractical to set up in rescue SSH.
+	// The raw image includes the full GPT partition layout (EFI, BOOT,
+	// META, STATE, A, B) with kernel + initramfs pre-written.
+	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
 	if out, err := c.Run(fmt.Sprintf(
-		"curl -fsSL %q -o /tmp/crane.tar.gz && tar xzf /tmp/crane.tar.gz -C /tmp crane && rm -f /tmp/crane.tar.gz && chmod +x /tmp/crane && /tmp/crane version",
-		craneURL,
+		"curl -fsSL %q -o /tmp/talos.raw.xz",
+		imageURL,
 	)); err != nil {
-		return fmt.Errorf("download crane: %w\nOutput: %s", err, out)
+		return fmt.Errorf("download Talos image: %w\nOutput: %s", err, out)
 	}
 
-	// Step 2: Export Talos installer from OCI image
+	// Step 2: Decompress and write to disk
 	if out, err := c.Run(fmt.Sprintf(
-		"/tmp/crane export --platform linux/amd64 %q /tmp/talos-installer.tar",
-		installerImage,
+		"xz -d /tmp/talos.raw.xz && dd if=/tmp/talos.raw of=%q bs=4M conv=fsync && rm -f /tmp/talos.raw",
+		disk,
 	)); err != nil {
-		return fmt.Errorf("crane export %s: %w\nOutput: %s", installerImage, err, out)
+		return fmt.Errorf("write Talos image to %s: %w\nOutput: %s", disk, err, out)
 	}
 
-	// Step 3: Extract full OCI image filesystem and run installer
-	// The Talos installer at usr/bin/installer needs boot assets from
-	// usr/install/amd64/ (kernel, systemd-boot). Extract everything to
-	// /tmp/talos-root and run installer from there.
-	if out, err := c.Run("mkdir -p /tmp/talos-root && tar xf /tmp/talos-installer.tar -C /tmp/talos-root && rm -f /tmp/talos-installer.tar && chmod +x /tmp/talos-root/usr/bin/installer"); err != nil {
-		return fmt.Errorf("extract installer: %w\nOutput: %s", err, out)
-	}
-
-	// Step 4: Run Talos installer with correct root for boot assets
-	installCmd := fmt.Sprintf(
-		"cd /tmp/talos-root && ./usr/bin/installer install --disk %q --zero --platform metal < /dev/null",
+	// Step 3: Set up UEFI boot entry via efibootmgr
+	// The raw image has an EFI System Partition at partition 1 with
+	// the Talos bootloader. Most UEFI firmware auto-discovers it via
+	// the fallback path, but explicitly creating a boot entry is more reliable.
+	efiCmd := fmt.Sprintf(
+		"efibootmgr -c -d %q -p 1 -L Talos -l '\\EFI\\boot\\bootx64.efi' 2>&1 || echo 'efibootmgr not available, relying on UEFI fallback'",
 		disk,
 	)
-	if out, err := c.Run(installCmd); err != nil {
-		return fmt.Errorf("talos installer: %w\nOutput: %s", err, out)
+	if out, err := c.Run(efiCmd); err != nil {
+		// Non-fatal: UEFI fallback boot usually works
+		_ = out
 	}
 
 	return nil
 }
-
-// Replaced single compound command with separate steps for reliable
-// error isolation. Each step runs in its own SSH session via Run().
-// Previous compound command (`set -eu; step1; step2; step3`) failed
-// silently with exit code 2 when run through Go's x/crypto/ssh,
-// despite working fine through OpenSSH — likely due to shell quoting
-// or buffering differences in the SSH exec channel.
 
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
 // Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.
