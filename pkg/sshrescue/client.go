@@ -192,15 +192,26 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	}
 
 	// Step 3: Run installer inside unshare namespace
-	// unshare provides mount + PID namespace so the installer can mount
-	// /proc and /sys (required by go-efilib for UEFI NVRAM access).
-	// This is equivalent to running inside a container but without Docker.
+	// unshare provides mount namespace so the installer can access /proc, /sys, /dev.
+	//
+	// Key details:
+	//   - /proc: tmpfs overlay with fake /proc/cmdline containing "talos.platform=metal"
+	//     (rescue kernel cmdline doesn't have this → installer nil-pointer panic at install.go:169)
+	//   - /sys: --rbind host sysfs (not mount -t sysfs) so go-efilib can access
+	//     /sys/firmware/efi/efivars for UEFI NVRAM boot entry creation
+	//   - /dev: --rbind host devtmpfs for block device access
+	//   - --force: required because WipeAllDisks uses blkdiscard (not partition delete),
+	//     so the disk may still have partition metadata that blocks mkfs
 	installCmd := fmt.Sprintf(
 		"unshare --mount --pid --fork -- bash -c '"+
-			"mount -t proc proc /tmp/talos-root/proc && "+
-			"mount -t sysfs sys /tmp/talos-root/sys && "+
-			"mount --bind /dev /tmp/talos-root/dev && "+
-			"chroot /tmp/talos-root /usr/bin/installer install --disk %q --zero --platform metal < /dev/null"+
+			"mount --rbind /sys /tmp/talos-root/sys && "+
+			"mount --rbind /dev /tmp/talos-root/dev && "+
+			"mount --rbind /run /tmp/talos-root/run 2>/dev/null; "+
+			"mount -t tmpfs tmpfs /tmp/talos-root/proc -o size=1M && "+
+			"echo talos.platform=metal > /tmp/talos-root/proc/cmdline && "+
+			"mkdir -p /tmp/talos-root/proc/self && "+
+			"echo talos.platform=metal > /tmp/talos-root/proc/self/cmdline && "+
+			"chroot /tmp/talos-root /usr/bin/installer install --disk %q --force --platform metal < /dev/null"+
 			"'",
 		disk,
 	)
