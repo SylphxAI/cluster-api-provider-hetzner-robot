@@ -359,3 +359,171 @@ func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
 		t.Errorf("expected /24 default prefix, got %v", addresses[0])
 	}
 }
+
+// ─── injectIPv6Config ──────────────────────────────────────────────────────
+
+func TestInjectIPv6Config(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	if iface["interface"] != "enp193s0f0np0" {
+		t.Errorf("expected interface enp193s0f0np0, got %v", iface["interface"])
+	}
+
+	addrs := iface["addresses"].([]interface{})
+	if len(addrs) != 1 || addrs[0] != "2a01:4f8:271:3b49::1/64" {
+		t.Errorf("expected 2a01:4f8:271:3b49::1/64, got %v", addrs)
+	}
+
+	routes := iface["routes"].([]interface{})
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	route := routes[0].(map[string]interface{})
+	if route["network"] != "::/0" || route["gateway"] != "fe80::1" {
+		t.Errorf("expected ::/0 via fe80::1, got %v", route)
+	}
+
+	// Verify sysctl
+	sysctls := machine["sysctls"].(map[string]interface{})
+	if sysctls["net.ipv6.conf.all.forwarding"] != "1" {
+		t.Errorf("expected ipv6 forwarding sysctl, got %v", sysctls)
+	}
+}
+
+func TestInjectIPv6Config_Empty(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty ipv6Net should return input unchanged")
+	}
+}
+
+func TestInjectIPv6Config_MergeExistingInterface(t *testing.T) {
+	input := []byte(`machine:
+  network:
+    interfaces:
+      - interface: enp193s0f0np0
+        dhcp: true
+        addresses:
+          - 10.0.0.1/24
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8::", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	addrs := iface["addresses"].([]interface{})
+	// Should have both existing IPv4 + new IPv6
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addresses (IPv4+IPv6), got %d: %v", len(addrs), addrs)
+	}
+	if addrs[0] != "10.0.0.1/24" {
+		t.Errorf("expected existing IPv4 preserved, got %v", addrs[0])
+	}
+	if addrs[1] != "2a01:4f8::1/64" {
+		t.Errorf("expected IPv6 appended, got %v", addrs[1])
+	}
+}
+
+// ─── injectProviderID ──────────────────────────────────────────────────────
+
+func TestInjectProviderID(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectProviderID(input, "hetzner-robot://2920324")
+	if err != nil {
+		t.Fatalf("injectProviderID failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	kubelet := machine["kubelet"].(map[string]interface{})
+	extraArgs := kubelet["extraArgs"].(map[string]interface{})
+	if extraArgs["provider-id"] != "hetzner-robot://2920324" {
+		t.Errorf("expected provider-id hetzner-robot://2920324, got %v", extraArgs["provider-id"])
+	}
+}
+
+func TestInjectProviderID_Empty(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectProviderID(input, "")
+	if err != nil {
+		t.Fatalf("injectProviderID failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty providerID should return input unchanged")
+	}
+}
+
+func TestInjectProviderID_PreservesExistingKubeletConfig(t *testing.T) {
+	input := []byte(`machine:
+  kubelet:
+    extraArgs:
+      rotate-server-certificates: "true"
+`)
+	result, err := injectProviderID(input, "hetzner-robot://123")
+	if err != nil {
+		t.Fatalf("injectProviderID failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	kubelet := machine["kubelet"].(map[string]interface{})
+	extraArgs := kubelet["extraArgs"].(map[string]interface{})
+	if extraArgs["rotate-server-certificates"] != "true" {
+		t.Errorf("existing kubelet extraArgs should be preserved, got %v", extraArgs)
+	}
+	if extraArgs["provider-id"] != "hetzner-robot://123" {
+		t.Errorf("provider-id should be injected, got %v", extraArgs["provider-id"])
+	}
+}

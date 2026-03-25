@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.5
+    controller-gen.kubebuilder.io/version: v0.20.1
   name: hetznerrobothosts.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
@@ -75,6 +75,13 @@ spec:
                   Used with HetznerRobotCluster.Spec.VLANConfig to inject VLAN interface
                   config into the Talos machineconfig during provisioning.
                   Required when VLANConfig is set on the cluster.
+                type: string
+              primaryInterface:
+                default: enp193s0f0np0
+                description: |-
+                  PrimaryInterface is the network interface name for public + IPv6 traffic.
+                  Defaults to "enp193s0f0np0" (Hetzner AX-series standard NIC).
+                  Override for non-standard hardware (e.g. older EX-series use "enp0s31f6").
                 type: string
               serverID:
                 description: |-

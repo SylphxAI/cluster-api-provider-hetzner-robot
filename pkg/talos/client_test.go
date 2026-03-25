@@ -106,8 +106,11 @@ func TestIsInMaintenanceMode_ContextCancelled(t *testing.T) {
 	}
 }
 
-func TestIsInMaintenanceMode_Integration(t *testing.T) {
-	// Start a listener on port 50000 if available, test the actual exported function
+func TestIsInMaintenanceMode_PlainTCPNotSufficient(t *testing.T) {
+	// IsInMaintenanceMode performs a gRPC+TLS probe, not just a TCP connect.
+	// A plain TCP listener without TLS causes a transport error, which the
+	// function conservatively treats as NOT maintenance mode. This is correct
+	// behavior — we verify it here.
 	ln, err := net.Listen("tcp", "127.0.0.1:50000")
 	if err != nil {
 		t.Skipf("cannot bind port 50000 (may be in use): %v", err)
@@ -115,8 +118,9 @@ func TestIsInMaintenanceMode_Integration(t *testing.T) {
 	defer ln.Close()
 
 	ctx := context.Background()
-	if !IsInMaintenanceMode(ctx, "127.0.0.1") {
-		t.Error("IsInMaintenanceMode should return true with listener on 50000")
+	// Should return false: plain TCP listener ≠ Talos maintenance gRPC server
+	if IsInMaintenanceMode(ctx, "127.0.0.1") {
+		t.Error("IsInMaintenanceMode should return false for plain TCP (not gRPC+TLS)")
 	}
 }
 
