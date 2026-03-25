@@ -193,7 +193,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 			// The archive contains the installer binary at /installer (static binary).
 			"echo '=== Step 2: Extracting Talos installer from OCI image ==='; "+
 			"echo 'Image: %s'; "+
-			"/tmp/crane export %q /tmp/talos-installer.tar; "+
+			"/tmp/crane export --platform linux/amd64 %q /tmp/talos-installer.tar 2>&1; "+
 			"tar xOf /tmp/talos-installer.tar installer > /tmp/talos-installer; "+
 			"chmod +x /tmp/talos-installer; "+
 			"echo 'Talos installer binary extracted successfully'; "+
