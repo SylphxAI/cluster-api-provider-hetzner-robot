@@ -591,6 +591,87 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
+// injectIPv6Config adds a global IPv6 address and default route to the primary interface.
+// Each Hetzner dedicated server gets a /64 subnet. We assign ::1 from that subnet
+// and use fe80::1 as the gateway (Hetzner standard for all dedicated servers).
+// Also sets net.ipv6.conf.all.forwarding=1 (required for pod IPv6 routing).
+func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string) ([]byte, error) {
+	if ipv6Net == "" {
+		return configData, nil
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal machineconfig for IPv6 injection: %w", err)
+	}
+
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	// Add IPv6 address to primary interface
+	network, ok := machine["network"].(map[string]interface{})
+	if !ok {
+		network = make(map[string]interface{})
+		machine["network"] = network
+	}
+
+	ipv6Addr := ipv6Net + "1/64" // e.g. 2a01:4f8:271:3b49::1/64
+
+	interfaces, _ := network["interfaces"].([]interface{})
+	found := false
+	for _, iface := range interfaces {
+		ifMap, ok := iface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if ifMap["interface"] == primaryInterface {
+			// Add IPv6 address to existing interface
+			addrs, _ := ifMap["addresses"].([]interface{})
+			addrs = append(addrs, ipv6Addr)
+			ifMap["addresses"] = addrs
+
+			// Add IPv6 default route
+			routes, _ := ifMap["routes"].([]interface{})
+			routes = append(routes, map[string]interface{}{
+				"network": "::/0",
+				"gateway": "fe80::1",
+			})
+			ifMap["routes"] = routes
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		// Primary interface not in config — create entry
+		newIface := map[string]interface{}{
+			"interface": primaryInterface,
+			"addresses": []interface{}{ipv6Addr},
+			"routes": []interface{}{
+				map[string]interface{}{
+					"network": "::/0",
+					"gateway": "fe80::1",
+				},
+			},
+		}
+		interfaces = append(interfaces, newIface)
+		network["interfaces"] = interfaces
+	}
+
+	// Set IPv6 forwarding sysctl (required for pod routing)
+	sysctls, ok := machine["sysctls"].(map[string]interface{})
+	if !ok {
+		sysctls = make(map[string]interface{})
+		machine["sysctls"] = sysctls
+	}
+	sysctls["net.ipv6.conf.all.forwarding"] = "1"
+
+	return yaml.Marshal(config)
+}
+
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig.
 // Ensures the parent interface has dhcp: true (to preserve public IP) and adds
 // the VLAN with the host's internal IP address.
@@ -810,6 +891,22 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"vlanID", hrc.Spec.VLANConfig.ID,
 			"interface", hrc.Spec.VLANConfig.Interface,
 			"internalIP", internalIP)
+	}
+
+	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
+	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.
+	if hrh.Spec.ServerIPv6Net != "" {
+		primaryInterface := "enp193s0f0np0" // Hetzner dedicated server standard NIC
+		if hrc.Spec.VLANConfig != nil && hrc.Spec.VLANConfig.Interface != "" {
+			primaryInterface = hrc.Spec.VLANConfig.Interface
+		}
+		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryInterface)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject IPv6 config: %w", err)
+		}
+		logger.Info("Injected IPv6 config into machineconfig",
+			"ipv6Net", hrh.Spec.ServerIPv6Net,
+			"interface", primaryInterface)
 	}
 
 	// Inject cluster-level secrets from the Talos secret bundle.

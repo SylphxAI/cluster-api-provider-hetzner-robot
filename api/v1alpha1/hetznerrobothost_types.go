@@ -29,9 +29,15 @@ type HetznerRobotHostSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	ServerID int `json:"serverID"`
 
-	// ServerIP is the public IP address of the server.
+	// ServerIP is the public IPv4 address of the server.
 	// Used for SSH rescue access and Talos API access.
 	ServerIP string `json:"serverIP"`
+
+	// ServerIPv6Net is the IPv6 /64 subnet assigned by Hetzner (e.g. "2a01:4f8:271:3b49::").
+	// CAPHR injects {net}1/64 as the node's IPv6 address + fe80::1 as gateway
+	// into the Talos machineconfig during provisioning. Enables dual-stack pods.
+	// +optional
+	ServerIPv6Net string `json:"serverIPv6Net,omitempty"`
 
 	// InternalIP is the VLAN IP address for this server (e.g. "10.10.0.1").
 	// Used with HetznerRobotCluster.Spec.VLANConfig to inject VLAN interface
