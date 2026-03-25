@@ -72,6 +72,9 @@ func (c *Client) Close() {
 }
 
 // Run executes a command on the remote host and returns stdout+stderr.
+// Commands are explicitly run via bash because some SSH servers (including
+// Hetzner rescue) may use dash as the exec channel shell, which lacks
+// bash features and has different buffering behavior with Go's x/crypto/ssh.
 func (c *Client) Run(command string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("not connected")
@@ -86,10 +89,19 @@ func (c *Client) Run(command string) (string, error) {
 	sess.Stdout = &buf
 	sess.Stderr = &buf
 
-	if err := sess.Run(command); err != nil {
-		return buf.String(), fmt.Errorf("command %q failed: %w\noutput: %s", command, err, buf.String())
+	// Wrap in bash -c to ensure consistent shell behavior.
+	// Go's x/crypto/ssh exec channel may use /bin/sh (dash on Debian),
+	// which has different behavior from bash for complex commands.
+	wrapped := fmt.Sprintf("bash -c %s", shellQuote(command))
+	if err := sess.Run(wrapped); err != nil {
+		return buf.String(), fmt.Errorf("command failed: %w\noutput: %s", err, buf.String())
 	}
 	return buf.String(), nil
+}
+
+// shellQuote wraps a string in single quotes, escaping embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // WipeAllDisks discovers all non-removable block devices and wipes them.
