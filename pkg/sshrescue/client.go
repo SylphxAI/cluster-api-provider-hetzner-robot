@@ -205,8 +205,13 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		disk,
 	)
 	if out, err := c.Run(installCmd); err != nil {
+		// Best-effort cleanup even on failure (rescue is RAM-based, OCI fs is ~500MB)
+		_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
 		return fmt.Errorf("talos installer: %w\nOutput: %s", err, out)
 	}
+
+	// Cleanup: OCI filesystem + crane binary (rescue is RAM-based)
+	_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
 
 	return nil
 }
