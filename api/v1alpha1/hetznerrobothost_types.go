@@ -46,6 +46,13 @@ type HetznerRobotHostSpec struct {
 	// +optional
 	InternalIP string `json:"internalIP,omitempty"`
 
+	// PrimaryInterface is the network interface name for public + IPv6 traffic.
+	// Defaults to "enp193s0f0np0" (Hetzner AX-series standard NIC).
+	// Override for non-standard hardware (e.g. older EX-series use "enp0s31f6").
+	// +optional
+	// +kubebuilder:default="enp193s0f0np0"
+	PrimaryInterface string `json:"primaryInterface,omitempty"`
+
 	// InstallDisk is the disk on which Talos will be installed.
 	// Defaults to /dev/nvme0n1
 	// +optional

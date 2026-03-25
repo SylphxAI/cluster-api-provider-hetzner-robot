@@ -896,7 +896,10 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
 	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.
 	if hrh.Spec.ServerIPv6Net != "" {
-		primaryInterface := "enp193s0f0np0" // Hetzner dedicated server standard NIC
+		primaryInterface := hrh.Spec.PrimaryInterface
+		if primaryInterface == "" {
+			primaryInterface = "enp193s0f0np0" // Hetzner AX-series standard NIC
+		}
 		if hrc.Spec.VLANConfig != nil && hrc.Spec.VLANConfig.Interface != "" {
 			primaryInterface = hrc.Spec.VLANConfig.Interface
 		}
@@ -1212,15 +1215,7 @@ type talosSecretBundle struct {
 
 // buildRobotClient creates a Robot API client from the HRC's secret.
 func (r *HetznerRobotMachineReconciler) buildRobotClient(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (*robot.Client, error) {
-	secret := &corev1.Secret{}
-	ns := hrc.Spec.RobotSecretRef.Namespace
-	if ns == "" {
-		ns = hrc.Namespace
-	}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: hrc.Spec.RobotSecretRef.Name}, secret); err != nil {
-		return nil, fmt.Errorf("get robot secret %s/%s: %w", ns, hrc.Spec.RobotSecretRef.Name, err)
-	}
-	return robot.New(string(secret.Data["robot-user"]), string(secret.Data["robot-password"])), nil
+	return robot.NewFromCluster(ctx, r.Client, hrc)
 }
 
 // getSSHPrivateKey retrieves the SSH private key from the HRC's SSH secret.

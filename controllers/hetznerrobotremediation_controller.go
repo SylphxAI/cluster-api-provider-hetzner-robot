@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -287,15 +286,7 @@ func (r *HetznerRobotRemediationReconciler) resolveServerAndCluster(
 
 // buildRobotClient creates a Robot API client from the HetznerRobotCluster's secret reference.
 func (r *HetznerRobotRemediationReconciler) buildRobotClient(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (*robot.Client, error) {
-	secret := &corev1.Secret{}
-	ns := hrc.Spec.RobotSecretRef.Namespace
-	if ns == "" {
-		ns = hrc.Namespace
-	}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: hrc.Spec.RobotSecretRef.Name}, secret); err != nil {
-		return nil, fmt.Errorf("get robot secret %s/%s: %w", ns, hrc.Spec.RobotSecretRef.Name, err)
-	}
-	return robot.New(string(secret.Data["robot-user"]), string(secret.Data["robot-password"])), nil
+	return robot.NewFromCluster(ctx, r.Client, hrc)
 }
 
 // getTimeout returns the configured strategy timeout, defaulting to 5 minutes if unset.
