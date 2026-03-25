@@ -104,7 +104,9 @@ func (c *Client) WipeAllDisks() (string, error) {
 	// Filters: TYPE=disk (no partitions), RM=0 (not removable/USB).
 	cmd := `set -e; ` +
 		`echo 'Discovering block devices...'; ` +
-		`DISKS=$(lsblk -dnpo NAME,TYPE,RM | awk '$2 == "disk" && $3 == "0" { print $1 }'); ` +
+		`lsblk -dnpo NAME,TYPE,RM > /tmp/lsblk.out; ` +
+		`DISKS=$(awk '$2 == "disk" && $3 == "0" { print $1 }' /tmp/lsblk.out); ` +
+		`rm -f /tmp/lsblk.out; ` +
 		`if [ -z "$DISKS" ]; then echo 'No disks found to wipe'; exit 0; fi; ` +
 		`for disk in $DISKS; do ` +
 		`echo "Wiping $disk..."; ` +
@@ -184,7 +186,9 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 			// needing Docker/podman in rescue mode.
 			"echo '=== Step 1: Downloading crane OCI tool ==='; "+
 			"CRANE_URL=\"https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz\"; "+
-			"curl -fsSL \"${CRANE_URL}\" | tar xz -C /tmp crane; "+
+			"curl -fsSL \"${CRANE_URL}\" -o /tmp/crane.tar.gz; "+
+			"tar xz -C /tmp crane -f /tmp/crane.tar.gz; "+
+			"rm -f /tmp/crane.tar.gz; "+
 			"chmod +x /tmp/crane; "+
 			"/tmp/crane version; "+
 
