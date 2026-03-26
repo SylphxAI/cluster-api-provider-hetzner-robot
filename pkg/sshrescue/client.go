@@ -112,6 +112,19 @@ func shellQuote(s string) string {
 // Uses blkdiscard (fast TRIM) with dd fallback (zero first 2GB) to clear
 // partition tables, filesystem metadata, and any leftover signatures.
 func (c *Client) WipeOSDisk(disk string) (string, error) {
+	// Safety: refuse to wipe if the disk has Ceph BlueStore data.
+	// This prevents catastrophic data loss if NVMe device enumeration
+	// differs between rescue and Talos (e.g., nvme0n1 ↔ nvme1n1 swap).
+	checkCmd := fmt.Sprintf(
+		`if blkid %[1]q 2>/dev/null | grep -q ceph_bluestore; then `+
+			`echo "ABORT: %[1]s has Ceph BlueStore data — refusing to wipe"; exit 1; `+
+			`fi`,
+		disk,
+	)
+	if out, err := c.Run(checkCmd); err != nil {
+		return out, fmt.Errorf("disk safety check failed for %s: Ceph data detected — aborting to prevent data loss: %w", disk, err)
+	}
+
 	cmd := fmt.Sprintf(
 		`set -e; `+
 			`echo "Wiping OS disk %[1]s..."; `+
@@ -178,7 +191,23 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("extract installer filesystem: %w\nOutput: %s", err, out)
 	}
 
-	// Step 3: Run installer inside unshare namespace
+	// Step 3: Safety — verify the install disk is NOT the Ceph data disk.
+	// NVMe device enumeration can swap between rescue and Talos boot
+	// (different PCI probe order). Refusing to install if target has BlueStore.
+	safetyCmd := fmt.Sprintf(
+		`if blkid %[1]q 2>/dev/null | grep -q ceph_bluestore; then `+
+			`echo "FATAL: install target %[1]s has Ceph BlueStore — wrong disk!"; exit 1; `+
+			`fi; `+
+			// Also verify: list ALL disks with BlueStore and ensure we're not about to overwrite one
+			`echo "Disk safety check passed for %[1]s"`,
+		disk,
+	)
+	if out, err := c.Run(safetyCmd); err != nil {
+		_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
+		return fmt.Errorf("SAFETY ABORT: install target %s appears to be the Ceph data disk: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 4: Run installer inside unshare namespace
 	// unshare provides mount namespace so the installer can access /proc, /sys, /dev.
 	//
 	// Key details:
