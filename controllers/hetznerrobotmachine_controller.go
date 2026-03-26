@@ -179,10 +179,11 @@ func isPermanentError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 
-	// No hosts available in the pool — requires adding HetznerRobotHost resources
-	if strings.Contains(msg, "no available hetznerrobothost found") {
-		return true
-	}
+	// No hosts available — transient during rolling updates (hosts free up as
+	// old Machines are deleted). NOT permanent: retry until a host becomes Available.
+	// Removed from permanent list: was causing Machines to fail during scale-up
+	// when all hosts are temporarily in use.
+	// if strings.Contains(msg, "no available hetznerrobothost found") — TRANSIENT
 
 	// Config parsing/validation errors — bad YAML, invalid structure
 	if strings.Contains(msg, "unmarshal") || strings.Contains(msg, "invalid") {
