@@ -104,6 +104,59 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// ResolveInstallDisk determines the correct install disk in the rescue environment.
+// NVMe device names (nvme0n1, nvme1n1) can swap between rescue and Talos boot
+// due to different PCI probe order. This function finds the correct disk by
+// checking which NVMe device does NOT have Ceph BlueStore data.
+//
+// Logic:
+//  1. List all NVMe whole-disk devices
+//  2. For each, check blkid for ceph_bluestore signature
+//  3. Return the one WITHOUT BlueStore (= safe to install Talos)
+//  4. If neither has BlueStore (fresh server), use the configured installDisk
+//  5. If BOTH have BlueStore, refuse (shouldn't happen)
+func (c *Client) ResolveInstallDisk(configuredDisk string) (string, error) {
+	out, err := c.Run(
+		`DISKS=$(lsblk -dnpo NAME,TYPE | awk '$2=="disk" && $1 ~ /nvme/ {print $1}'); ` +
+			`SAFE=""; ` +
+			`CEPH=""; ` +
+			`for d in $DISKS; do ` +
+			`if blkid "$d" 2>/dev/null | grep -q ceph_bluestore; then ` +
+			`CEPH="$CEPH $d"; ` +
+			`else ` +
+			`SAFE="$SAFE $d"; ` +
+			`fi; ` +
+			`done; ` +
+			`SAFE=$(echo $SAFE | xargs); ` +
+			`CEPH=$(echo $CEPH | xargs); ` +
+			`if [ -z "$SAFE" ]; then ` +
+			`echo "ERROR:all_disks_have_bluestore"; ` +
+			`elif echo "$SAFE" | grep -q " "; then ` +
+			// Multiple safe disks — use the configured one if it's in the safe list
+			`if echo "$SAFE" | grep -qw "` + configuredDisk + `"; then ` +
+			`echo "` + configuredDisk + `"; ` +
+			`else ` +
+			`echo "$SAFE" | awk '{print $1}'; ` +
+			`fi; ` +
+			`else ` +
+			`echo "$SAFE"; ` +
+			`fi`,
+	)
+	if err != nil {
+		return "", fmt.Errorf("resolve install disk: %w\nOutput: %s", err, out)
+	}
+
+	resolved := strings.TrimSpace(out)
+	if resolved == "ERROR:all_disks_have_bluestore" {
+		return "", fmt.Errorf("all NVMe disks have Ceph BlueStore data — cannot determine install disk safely")
+	}
+	if resolved == "" {
+		return configuredDisk, nil // fallback
+	}
+
+	return resolved, nil
+}
+
 // WipeOSDisk wipes only the OS install disk, leaving all other disks untouched.
 // During reprovision, Ceph OSD data on other disks (e.g. nvme1n1) must survive —
 // wiping them would destroy storage cluster data and force a full rebuild.

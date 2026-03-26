@@ -479,9 +479,21 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	defer sshClient.Close()
 
-	installDisk := hrm.Spec.InstallDisk
-	if installDisk == "" {
-		installDisk = "/dev/nvme0n1"
+	configuredDisk := hrm.Spec.InstallDisk
+	if configuredDisk == "" {
+		configuredDisk = "/dev/nvme0n1"
+	}
+
+	// Resolve the actual install disk by checking which NVMe device is safe.
+	// NVMe device names can swap between rescue and Talos boot due to different
+	// PCI probe order. ResolveInstallDisk picks the disk WITHOUT Ceph BlueStore.
+	installDisk, err := sshClient.ResolveInstallDisk(configuredDisk)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve install disk on %s: %w", serverIP, err)
+	}
+	if installDisk != configuredDisk {
+		logger.Info("Install disk resolved to different device (NVMe name swap detected)",
+			"configured", configuredDisk, "resolved", installDisk, "ip", serverIP)
 	}
 
 	// Wipe only the OS install disk — Ceph OSD data on other disks must survive
