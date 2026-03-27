@@ -208,6 +208,23 @@ func (c *Client) WipeOSDisk(disk string) (string, error) {
 //     with correct UUIDs — future-proof across Talos releases.
 //   - --zero: secure wipe before partitioning.
 //
+// Why not Hetzner installimage:
+//   installimage is ideal for standard Linux (Debian, Ubuntu) — it handles
+//   partitioning, filesystem, bootloader, and network in one command. However,
+//   Talos cannot use installimage because:
+//     1. Talos uses a proprietary GPT layout (BIOS boot + EFI + BOOT + META +
+//        STATE + A/B partitions) with specific UUIDs that installimage cannot
+//        produce. installimage only supports standard partition schemes.
+//     2. Talos is distributed as OCI images, not tar.gz/raw disk images.
+//        installimage's -i flag expects a standard OS archive or raw image.
+//     3. The Talos installer binary must run to generate the correct UKI
+//        (Unified Kernel Image) and create EFI boot entries via go-efilib.
+//        installimage has no hook for running a custom installer post-extract.
+//     4. Talos has no package manager, no standard init, no /etc/fstab — it
+//        is an immutable OS that boots from a squashfs/initramfs. installimage
+//        assumes a conventional mutable Linux filesystem layout.
+//   The OCI + unshare approach remains the correct method for Talos.
+//
 // Flow:
 //  1. Download crane (static OCI tool, ~15MB) + export installer image
 //  2. Extract full OCI filesystem to /tmp/talos-root
