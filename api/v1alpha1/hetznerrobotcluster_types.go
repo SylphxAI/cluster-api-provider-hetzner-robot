@@ -59,6 +59,12 @@ type HetznerRobotClusterSpec struct {
 	// If set, CAPHR reads the key from this secret and injects it into the machineconfig.
 	// +optional
 	TalosSecretRef *corev1.SecretReference `json:"talosSecretRef,omitempty"`
+
+	// DC is the Hetzner datacenter identifier (e.g. "fsn1", "nbg1", "hel1").
+	// Used in hostname generation: compute-<dc>-<serverID>.
+	// Defaults to "fsn1" if not set.
+	// +optional
+	DC string `json:"dc,omitempty"`
 }
 
 // HetznerRobotClusterStatus defines the observed state of HetznerRobotCluster.

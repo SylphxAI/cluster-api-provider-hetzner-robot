@@ -826,26 +826,24 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 
 // injectHostname sets machine.network.hostname in the Talos machineconfig.
 //
-// Format: <cluster>-<role>-<serverID>
-//   - cluster: CAPI Cluster name (e.g. "talos-production")
-//   - role:    "cp" for control-plane, "wk" for worker
+// Format: compute-<dc>-<serverID>
+//   - "compute" is the node type (all K8s nodes are compute; storage nodes aren't in K8s)
+//   - dc: Hetzner datacenter (e.g. "fsn1", "nbg1", "hel1") — from HetznerRobotCluster.Spec.DC
 //   - serverID: Hetzner Robot server ID (immutable hardware identifier)
 //
-// Example: "talos-production-cp-2920324"
+// Example: "compute-fsn1-2938104"
 //
-// Server ID is used instead of IP because IPs can change (DHCP, reconfig).
-// Server IDs are assigned by Hetzner and never reused — zero collision risk
-// even at 1000+ nodes. The hostname doubles as the K8s node name.
-func injectHostname(configData []byte, clusterName string, isControlPlane bool, serverID int) ([]byte, error) {
+// Role (CP/WK) is deliberately excluded — it can change. Use K8s labels for role.
+// Server IDs are assigned by Hetzner and never reused — zero collision risk at any scale.
+func injectHostname(configData []byte, dc string, serverID int) ([]byte, error) {
 	if serverID == 0 {
 		return configData, nil
 	}
 
-	role := "wk"
-	if isControlPlane {
-		role = "cp"
+	if dc == "" {
+		dc = "fsn1" // Default to Falkenstein DC1
 	}
-	hostname := fmt.Sprintf("%s-%s-%d", clusterName, role, serverID)
+	hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
 
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(configData, &config); err != nil {
@@ -1089,20 +1087,20 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"internalIP", internalIP)
 	}
 
-	// Inject deterministic hostname: <cluster>-<role>-<serverID>.
+	// Inject deterministic hostname: compute-<dc>-<serverID>.
 	// Server ID is immutable (Hetzner hardware ID) — survives IP changes,
 	// DHCP reconfig, and reprovisions. Zero collision risk at any scale.
+	// Role (CP/WK) excluded — use K8s labels. DC from HetznerRobotCluster.
 	{
-		isCP := util.IsControlPlaneMachine(machine)
-		bootstrapData, err = injectHostname(bootstrapData, cluster.Name, isCP, serverID)
+		dc := hrc.Spec.DC
+		bootstrapData, err = injectHostname(bootstrapData, dc, serverID)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
 		}
-		role := "wk"
-		if isCP {
-			role = "cp"
+		if dc == "" {
+			dc = "fsn1"
 		}
-		hostname := fmt.Sprintf("%s-%s-%d", cluster.Name, role, serverID)
+		hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
 		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
 	}
 
