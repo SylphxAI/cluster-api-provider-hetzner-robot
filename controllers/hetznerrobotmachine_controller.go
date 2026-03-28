@@ -543,35 +543,6 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		logger.Info("OS disk wiped", "ip", serverIP, "disk", installDisk, "output", out)
 	}
 
-	// Fix EFI boot order: ensure PXE is first, before any OS boot entries.
-	// Without this, the installed Talos shimx64.efi takes EFI priority over PXE,
-	// making future rescue mode boots impossible (Hetzner rescue relies on PXE).
-	// Safe to run in rescue — efibootmgr reads/writes NVRAM directly.
-	if out, err := sshClient.Run(`
-		if command -v efibootmgr > /dev/null 2>&1; then
-			# Find PXE boot entry number
-			PXE_NUM=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
-			if [ -n "$PXE_NUM" ]; then
-				# Get all other boot entries
-				ALL_NUMS=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | tr '\n' ',')
-				# Build new order: PXE first, then everything else
-				OTHER_NUMS=$(echo "$ALL_NUMS" | tr ',' '\n' | grep -v "^${PXE_NUM}$" | tr '\n' ',')
-				NEW_ORDER="${PXE_NUM},${OTHER_NUMS%,}"
-				efibootmgr -o "$NEW_ORDER" 2>&1
-				echo "EFI boot order fixed: PXE ($PXE_NUM) first"
-			else
-				echo "No PXE boot entry found — skipping efibootmgr fix"
-			fi
-		else
-			echo "efibootmgr not available in rescue — skipping"
-		fi
-	`); err != nil {
-		// Non-fatal: boot order fix is best-effort
-		logger.Info("EFI boot order fix failed (non-fatal)", "error", err, "output", out)
-	} else {
-		logger.Info("EFI boot order fix applied", "output", out)
-	}
-
 	factoryURL := hrc.Spec.TalosFactoryBaseURL
 	if factoryURL == "" {
 		factoryURL = talosFactoryDefaultBaseURL
