@@ -799,6 +799,28 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 	}
 	sysctls["net.ipv6.conf.all.forwarding"] = "1"
 
+	// Set kubelet nodeIP for dual-stack: IPv4 (VLAN) + IPv6.
+	// Without this, kubelet only advertises the IPv4 address and K8s
+	// doesn't know the node has IPv6 connectivity.
+	kubelet, ok := machine["kubelet"].(map[string]interface{})
+	if !ok {
+		kubelet = make(map[string]interface{})
+		machine["kubelet"] = kubelet
+	}
+	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
+	if !ok {
+		extraArgs = make(map[string]interface{})
+		kubelet["extraArgs"] = extraArgs
+	}
+	// Kubelet dual-stack: existing IPv4 nodeIP + new IPv6
+	ipv6Only := strings.TrimSuffix(ipv6Net, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
+	if existingNodeIP, ok := extraArgs["node-ip"].(string); ok && existingNodeIP != "" {
+		// Append IPv6 to existing IPv4
+		extraArgs["node-ip"] = existingNodeIP + "," + ipv6Only
+	} else {
+		extraArgs["node-ip"] = ipv6Only
+	}
+
 	return yaml.Marshal(config)
 }
 
