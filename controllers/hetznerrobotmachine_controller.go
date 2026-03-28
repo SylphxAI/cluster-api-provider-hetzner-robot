@@ -586,11 +586,30 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
 	}
 
-	logger.Info("Talos image written, deactivating rescue before reboot", "ip", serverIP)
+	logger.Info("Talos image written, fixing EFI boot order post-install", "ip", serverIP)
 
-	// Deactivate rescue BEFORE rebooting. The EFI boot order is set to PXE first,
-	// then Talos. If rescue stays active, PXE responds → boots rescue again instead
-	// of Talos. By deactivating rescue, PXE silently fails → falls through to Talos.
+	// Fix EFI boot order AGAIN after Talos install. The Talos installer writes its own
+	// EFI boot entry (shimx64.efi) which takes priority over PXE. Without this second
+	// fix, the server won't PXE boot on future rescue attempts.
+	if out, err := sshClient.Run(`
+		if command -v efibootmgr > /dev/null 2>&1; then
+			PXE_NUM=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
+			if [ -n "$PXE_NUM" ]; then
+				ALL_NUMS=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | tr '\n' ',')
+				OTHER_NUMS=$(echo "$ALL_NUMS" | tr ',' '\n' | grep -v "^${PXE_NUM}$" | tr '\n' ',')
+				NEW_ORDER="${PXE_NUM},${OTHER_NUMS%,}"
+				efibootmgr -o "$NEW_ORDER" 2>&1
+				echo "EFI boot order fixed post-install: PXE ($PXE_NUM) first"
+			fi
+		fi
+	`); err != nil {
+		logger.Info("Post-install EFI fix failed (non-fatal)", "error", err, "output", out)
+	} else {
+		logger.Info("Post-install EFI boot order fix applied", "output", out)
+	}
+
+	// Deactivate rescue BEFORE rebooting. PXE is first in boot order but rescue is
+	// deactivated, so PXE silently fails → falls through to Talos.
 	if err := robotClient.DeactivateRescue(ctx, serverID); err != nil {
 		// Non-fatal: worst case the server boots back into rescue, and the next
 		// reconcile (stateWaitInstall) will detect it and retry.
