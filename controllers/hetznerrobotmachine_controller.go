@@ -307,14 +307,22 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 }
 
-// maxHWResetRetries is the number of hardware resets before escalating to a manual reset.
-// EFI boot order issues (e.g., Talos shimx64 before PXE) can make automated rescue
-// impossible — only Hetzner technicians can fix the boot order via physical access.
-const maxHWResetRetries = 5
+const (
+	// maxHWResetRetries is the number of hardware resets before escalating to a manual reset.
+	maxHWResetRetries = 5
+	// maxTotalRetries is the absolute limit. After this, provisioning is marked FAILED.
+	// Prevents infinite manual reset requests to Hetzner. One man reset should suffice —
+	// if rescue still fails after that, the server needs manual investigation.
+	maxTotalRetries = 8
+)
 
 // stateActivateRescue activates rescue mode via Robot API and triggers a reset.
-// After maxHWResetRetries failed hardware resets, it escalates to a manual reset
-// (Hetzner technician intervention) to fix EFI boot order issues.
+//
+// Escalation ladder:
+//   retry 1–5:  hardware reset (automated, instant)
+//   retry 6:    manual reset (Hetzner technician, 15–60 min)
+//   retry 7–8:  hardware reset (give man-reset result a chance)
+//   retry 9+:   FATAL — stop retrying, mark machine as failed
 func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
@@ -324,6 +332,14 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Hard stop: prevent infinite reset bombing
+	if hrm.Status.RetryCount > maxTotalRetries {
+		logger.Error(nil, "FATAL: rescue activation failed after manual reset — giving up. Server needs manual investigation.",
+			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+		hrm.Status.ProvisioningState = infrav1.StateError
+		return ctrl.Result{}, nil // Don't requeue — terminal state
+	}
 
 	// Get SSH key fingerprint for rescue auth
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
@@ -337,21 +353,20 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", serverID, err)
 	}
 
-	// Choose reset type based on retry count.
-	// After maxHWResetRetries failed hw resets, the server likely has an EFI boot order
-	// issue (OS boot entry before PXE). Escalate to manual reset — Hetzner technicians
-	// will physically ensure PXE boots. Typically takes 15-60 minutes.
+	// Escalation: after maxHWResetRetries, request ONE manual reset.
+	// After that, fall back to hw resets to give the man-reset result a chance.
 	resetType := robot.ResetTypeHardware
 	requeueDelay := 90 * time.Second
 
-	if hrm.Status.RetryCount >= maxHWResetRetries {
+	if hrm.Status.RetryCount == maxHWResetRetries {
+		// Exactly at threshold: escalate to manual reset (once)
 		resetType = robot.ResetTypeManual
-		requeueDelay = 10 * time.Minute // Manual resets take longer
-		logger.Info("Escalating to manual reset — automated hw resets exhausted, likely EFI boot order issue",
+		requeueDelay = 10 * time.Minute
+		logger.Info("Escalating to manual reset (one-time) — automated hw resets exhausted, likely EFI boot order issue",
 			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
 	} else {
 		logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP,
-			"retryCount", hrm.Status.RetryCount)
+			"resetType", string(resetType), "retryCount", hrm.Status.RetryCount)
 	}
 
 	if err := robotClient.ResetServer(ctx, serverID, resetType); err != nil {
