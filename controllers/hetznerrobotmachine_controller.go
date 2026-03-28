@@ -307,22 +307,16 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 }
 
-const (
-	// maxHWResetRetries is the number of hardware resets before escalating to a manual reset.
-	maxHWResetRetries = 5
-	// maxTotalRetries is the absolute limit. After this, provisioning is marked FAILED.
-	// Prevents infinite manual reset requests to Hetzner. One man reset should suffice —
-	// if rescue still fails after that, the server needs manual investigation.
-	maxTotalRetries = 8
-)
+// maxResetRetries is the maximum number of hw reset attempts before marking the machine
+// as failed. If rescue boot keeps failing (EFI boot order issue), the post-install
+// efibootmgr fix will prevent recurrence. For the initial case, an operator must
+// manually request a reset via Hetzner Robot panel.
+const maxResetRetries = 8
 
-// stateActivateRescue activates rescue mode via Robot API and triggers a reset.
-//
-// Escalation ladder:
-//   retry 1–5:  hardware reset (automated, instant)
-//   retry 6:    manual reset (Hetzner technician, 15–60 min)
-//   retry 7–8:  hardware reset (give man-reset result a chance)
-//   retry 9+:   FATAL — stop retrying, mark machine as failed
+// stateActivateRescue activates rescue mode via Robot API and triggers a hw reset.
+// After maxResetRetries failed attempts, marks the machine as failed (StateError).
+// An operator must then manually fix the server (e.g., Hetzner Robot panel manual reset)
+// and reset the Machine status to retry.
 func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
@@ -333,50 +327,33 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Hard stop: prevent infinite reset bombing
-	if hrm.Status.RetryCount > maxTotalRetries {
-		logger.Error(nil, "FATAL: rescue activation failed after manual reset — giving up. Server needs manual investigation.",
+	if hrm.Status.RetryCount > maxResetRetries {
+		logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual intervention via Hetzner Robot panel",
 			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
 		hrm.Status.ProvisioningState = infrav1.StateError
-		return ctrl.Result{}, nil // Don't requeue — terminal state
+		return ctrl.Result{}, nil
 	}
 
-	// Get SSH key fingerprint for rescue auth
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("get SSH key fingerprint: %w", err)
 	}
 
-	// Activate rescue mode
 	_, err = robotClient.ActivateRescue(ctx, serverID, sshFingerprint)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", serverID, err)
 	}
 
-	// Escalation: after maxHWResetRetries, request ONE manual reset.
-	// After that, fall back to hw resets to give the man-reset result a chance.
-	resetType := robot.ResetTypeHardware
-	requeueDelay := 90 * time.Second
+	logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP,
+		"retryCount", hrm.Status.RetryCount)
 
-	if hrm.Status.RetryCount == maxHWResetRetries {
-		// Exactly at threshold: escalate to manual reset (once)
-		resetType = robot.ResetTypeManual
-		requeueDelay = 10 * time.Minute
-		logger.Info("Escalating to manual reset (one-time) — automated hw resets exhausted, likely EFI boot order issue",
-			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
-	} else {
-		logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP,
-			"resetType", string(resetType), "retryCount", hrm.Status.RetryCount)
-	}
-
-	if err := robotClient.ResetServer(ctx, serverID, resetType); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reset server %d (type=%s): %w", serverID, resetType, err)
+	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", serverID, err)
 	}
 
 	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
-	logger.Info("Rescue activated, server resetting",
-		"serverID", serverID, "resetType", string(resetType))
-	return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	logger.Info("Rescue activated, server resetting", "serverID", serverID)
+	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
 }
 
 // stateCheckRescueActive waits for SSH to be available in rescue mode.

@@ -151,11 +151,7 @@ type ResetType string
 const (
 	ResetTypeSoftware ResetType = "sw"
 	ResetTypeHardware ResetType = "hw"
-	ResetTypePower    ResetType = "power"
-	// ResetTypeManual requests Hetzner technicians to physically reset the server.
-	// Use as last resort when automated resets fail (e.g., EFI boot order prevents PXE rescue).
-	// Response time: typically 15-60 minutes.
-	ResetTypeManual ResetType = "man"
+	ResetTypePower ResetType = "power"
 )
 
 // ResetServer sends a reset/reboot signal to the server.
