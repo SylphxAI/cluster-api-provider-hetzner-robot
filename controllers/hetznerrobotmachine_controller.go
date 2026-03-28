@@ -307,7 +307,14 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 }
 
-// stateActivateRescue activates rescue mode via Robot API and triggers a hardware reset.
+// maxHWResetRetries is the number of hardware resets before escalating to a manual reset.
+// EFI boot order issues (e.g., Talos shimx64 before PXE) can make automated rescue
+// impossible — only Hetzner technicians can fix the boot order via physical access.
+const maxHWResetRetries = 5
+
+// stateActivateRescue activates rescue mode via Robot API and triggers a reset.
+// After maxHWResetRetries failed hardware resets, it escalates to a manual reset
+// (Hetzner technician intervention) to fix EFI boot order issues.
 func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
@@ -317,7 +324,6 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP)
 
 	// Get SSH key fingerprint for rescue auth
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
@@ -331,14 +337,31 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", serverID, err)
 	}
 
-	// Hardware reset to boot into rescue
-	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", serverID, err)
+	// Choose reset type based on retry count.
+	// After maxHWResetRetries failed hw resets, the server likely has an EFI boot order
+	// issue (OS boot entry before PXE). Escalate to manual reset — Hetzner technicians
+	// will physically ensure PXE boots. Typically takes 15-60 minutes.
+	resetType := robot.ResetTypeHardware
+	requeueDelay := 90 * time.Second
+
+	if hrm.Status.RetryCount >= maxHWResetRetries {
+		resetType = robot.ResetTypeManual
+		requeueDelay = 10 * time.Minute // Manual resets take longer
+		logger.Info("Escalating to manual reset — automated hw resets exhausted, likely EFI boot order issue",
+			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+	} else {
+		logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP,
+			"retryCount", hrm.Status.RetryCount)
+	}
+
+	if err := robotClient.ResetServer(ctx, serverID, resetType); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reset server %d (type=%s): %w", serverID, resetType, err)
 	}
 
 	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
-	logger.Info("Rescue activated, server resetting", "serverID", serverID)
-	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil // Give it time to reset + boot rescue
+	logger.Info("Rescue activated, server resetting",
+		"serverID", serverID, "resetType", string(resetType))
+	return ctrl.Result{RequeueAfter: requeueDelay}, nil
 }
 
 // stateCheckRescueActive waits for SSH to be available in rescue mode.
