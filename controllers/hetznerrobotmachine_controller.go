@@ -736,16 +736,27 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 }
 
 // injectHostname sets machine.network.hostname in the Talos machineconfig.
-// The hostname is derived from the VLAN internal IP: dots replaced with dashes,
-// prefixed with "talos-". Example: "10.10.0.3" → "talos-10-10-0-3".
-// This ensures the Kubernetes node name is deterministic across reprovisions,
-// since Talos uses this hostname as the kubelet node name.
-func injectHostname(configData []byte, internalIP string) ([]byte, error) {
-	if internalIP == "" {
+//
+// Format: <cluster>-<role>-<serverID>
+//   - cluster: CAPI Cluster name (e.g. "talos-production")
+//   - role:    "cp" for control-plane, "wk" for worker
+//   - serverID: Hetzner Robot server ID (immutable hardware identifier)
+//
+// Example: "talos-production-cp-2920324"
+//
+// Server ID is used instead of IP because IPs can change (DHCP, reconfig).
+// Server IDs are assigned by Hetzner and never reused — zero collision risk
+// even at 1000+ nodes. The hostname doubles as the K8s node name.
+func injectHostname(configData []byte, clusterName string, isControlPlane bool, serverID int) ([]byte, error) {
+	if serverID == 0 {
 		return configData, nil
 	}
 
-	hostname := "talos-" + strings.ReplaceAll(internalIP, ".", "-")
+	role := "wk"
+	if isControlPlane {
+		role = "cp"
+	}
+	hostname := fmt.Sprintf("%s-%s-%d", clusterName, role, serverID)
 
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(configData, &config); err != nil {
@@ -989,15 +1000,21 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"internalIP", internalIP)
 	}
 
-	// Inject deterministic hostname derived from the VLAN internal IP.
-	// This ensures the K8s node name is stable across reprovisions:
-	// "10.10.0.3" → "talos-10-10-0-3". Skipped if no VLAN / internalIP.
-	if internalIP := hrh.Spec.InternalIP; internalIP != "" {
-		bootstrapData, err = injectHostname(bootstrapData, internalIP)
+	// Inject deterministic hostname: <cluster>-<role>-<serverID>.
+	// Server ID is immutable (Hetzner hardware ID) — survives IP changes,
+	// DHCP reconfig, and reprovisions. Zero collision risk at any scale.
+	{
+		isCP := util.IsControlPlaneMachine(machine)
+		bootstrapData, err = injectHostname(bootstrapData, cluster.Name, isCP, serverID)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
 		}
-		logger.Info("Injected hostname into machineconfig", "hostname", "talos-"+strings.ReplaceAll(internalIP, ".", "-"))
+		role := "wk"
+		if isCP {
+			role = "cp"
+		}
+		hostname := fmt.Sprintf("%s-%s-%d", cluster.Name, role, serverID)
+		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
 	}
 
 	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
