@@ -541,6 +541,10 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	// fix, the server won't PXE boot on future rescue attempts.
 	if out, err := sshClient.Run(`
 		if command -v efibootmgr > /dev/null 2>&1; then
+			# Mount efivars read-write (rescue mounts it read-only by default)
+			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
+			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+
 			PXE_NUM=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
 			if [ -n "$PXE_NUM" ]; then
 				OTHER=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | grep -v "^${PXE_NUM}$" | paste -sd,)
@@ -551,6 +555,7 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 				fi
 				echo "Setting boot order: $NEW_ORDER"
 				efibootmgr -o "$NEW_ORDER" 2>&1
+				echo "Verify: $(efibootmgr | grep BootOrder)"
 			fi
 		fi
 	`); err != nil {
