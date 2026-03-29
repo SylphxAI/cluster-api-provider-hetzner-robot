@@ -707,6 +707,37 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
+// injectCiliumStartupTaint adds node.cilium.io/agent-not-ready taint to kubelet config.
+// Cilium removes this taint automatically once initialized. Prevents pod scheduling
+// failures during the 1-2 min Cilium warmup on new nodes.
+func injectCiliumStartupTaint(configData []byte) ([]byte, error) {
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, err
+	}
+
+	machine, ok := config["machine"].(map[string]interface{})
+	if !ok {
+		machine = make(map[string]interface{})
+		config["machine"] = machine
+	}
+
+	kubelet, ok := machine["kubelet"].(map[string]interface{})
+	if !ok {
+		kubelet = make(map[string]interface{})
+		machine["kubelet"] = kubelet
+	}
+
+	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
+	if !ok {
+		extraArgs = make(map[string]interface{})
+		kubelet["extraArgs"] = extraArgs
+	}
+
+	extraArgs["register-with-taints"] = "node.cilium.io/agent-not-ready=true:NoSchedule"
+	return yaml.Marshal(config)
+}
+
 // injectIPv6Config adds a global IPv6 address and default route to the primary NIC.
 // Uses deviceSelector by MAC address — works regardless of OS NIC naming
 // (rescue uses eth0, Talos uses enp193s0f0np0, etc.).
@@ -1055,6 +1086,14 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("inject install disk into config: %w", err)
 	}
 	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
+
+	// Inject Cilium startup taint: prevents workload scheduling until Cilium is ready.
+	// Cilium agent automatically removes this taint once it's initialized on the node.
+	// Without this, pods scheduled to a new node fail with "unable to create endpoint".
+	bootstrapData, err = injectCiliumStartupTaint(bootstrapData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("inject Cilium startup taint: %w", err)
+	}
 
 	// Primary NIC MAC — detected during rescue install, stored in status
 	primaryMAC := hrm.Status.PrimaryMAC
