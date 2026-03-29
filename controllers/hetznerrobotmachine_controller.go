@@ -494,6 +494,17 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	defer sshClient.Close()
 
+	// Auto-detect primary NIC MAC address from rescue.
+	// Used for Talos deviceSelector (hardware-based, not name-based).
+	// NIC names differ between rescue (eth0) and Talos (enp193s0f0np0) — MAC is stable.
+	primaryMAC, err := sshClient.Run(`ip link show $(ip route show default | awk '{print $5}') | grep ether | awk '{print $2}'`)
+	if err != nil || strings.TrimSpace(primaryMAC) == "" {
+		return ctrl.Result{}, fmt.Errorf("detect primary NIC MAC on %s: %w (output: %s)", serverIP, err, primaryMAC)
+	}
+	primaryMAC = strings.TrimSpace(primaryMAC)
+	hrm.Status.PrimaryMAC = primaryMAC
+	logger.Info("Detected primary NIC MAC", "mac", primaryMAC, "ip", serverIP)
+
 	configuredDisk := hrm.Spec.InstallDisk
 	if configuredDisk == "" {
 		configuredDisk = "/dev/nvme0n1"
@@ -696,12 +707,12 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
-// injectIPv6Config adds a global IPv6 address and default route to the primary interface.
-// Each Hetzner dedicated server gets a /64 subnet. We assign ::1 from that subnet
-// and use fe80::1 as the gateway (Hetzner standard for all dedicated servers).
-// Also sets net.ipv6.conf.all.forwarding=1 (required for pod IPv6 routing).
-func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string, internalIP string) ([]byte, error) {
-	if ipv6Net == "" {
+// injectIPv6Config adds a global IPv6 address and default route to the primary NIC.
+// Uses deviceSelector by MAC address — works regardless of OS NIC naming
+// (rescue uses eth0, Talos uses enp193s0f0np0, etc.).
+// Also sets kubelet dual-stack nodeIP and IPv6 forwarding sysctl.
+func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, internalIP string) ([]byte, error) {
+	if ipv6Net == "" || primaryMAC == "" {
 		return configData, nil
 	}
 
@@ -716,7 +727,6 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 		config["machine"] = machine
 	}
 
-	// Add IPv6 address to primary interface
 	network, ok := machine["network"].(map[string]interface{})
 	if !ok {
 		network = make(map[string]interface{})
@@ -725,6 +735,7 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 
 	ipv6Addr := ipv6Net + "1/64" // e.g. 2a01:4f8:271:3b49::1/64
 
+	// Find existing interface by deviceSelector MAC or create new
 	interfaces, _ := network["interfaces"].([]interface{})
 	found := false
 	for _, iface := range interfaces {
@@ -732,13 +743,12 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 		if !ok {
 			continue
 		}
-		if ifMap["interface"] == primaryInterface {
-			// Add IPv6 address to existing interface
+		// Match by deviceSelector.hardwareAddr or by legacy interface name
+		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
+		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
 			addrs, _ := ifMap["addresses"].([]interface{})
 			addrs = append(addrs, ipv6Addr)
 			ifMap["addresses"] = addrs
-
-			// Add IPv6 default route
 			routes, _ := ifMap["routes"].([]interface{})
 			routes = append(routes, map[string]interface{}{
 				"network": "::/0",
@@ -751,9 +761,10 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 	}
 
 	if !found {
-		// Primary interface not in config — create entry
 		newIface := map[string]interface{}{
-			"interface": primaryInterface,
+			"deviceSelector": map[string]interface{}{
+				"hardwareAddr": primaryMAC,
+			},
 			"addresses": []interface{}{ipv6Addr},
 			"routes": []interface{}{
 				map[string]interface{}{
@@ -842,13 +853,9 @@ func injectHostname(configData []byte, dc string, serverID int) ([]byte, error) 
 }
 
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig.
-// Ensures the parent interface has dhcp: true (to preserve public IP) and adds
-// the VLAN with the host's internal IP address.
-//
-// CRITICAL: Talos strategic merge on machine.network.interfaces uses "interface" as key.
-// If the original config has no explicit interface entry, this creates one. The dhcp: true
-// MUST be included or Talos drops auto-DHCP on the interface → public IP lost → node unreachable.
-func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string) ([]byte, error) {
+// Uses deviceSelector by MAC address for parent NIC identification.
+// Ensures dhcp: true on parent (preserves public IP) and adds VLAN with internal IP.
+func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string) ([]byte, error) {
 	if vlanCfg == nil || internalIP == "" {
 		return configData, nil
 	}
@@ -883,11 +890,13 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		},
 	}
 
-	// Build the interface entry with dhcp: true + VLAN
+	// Build the interface entry with deviceSelector + dhcp: true + VLAN
 	ifaceEntry := map[string]interface{}{
-		"interface": vlanCfg.Interface,
-		"dhcp":      true, // CRITICAL: preserve public IP via DHCP
-		"vlans":     []interface{}{vlanEntry},
+		"deviceSelector": map[string]interface{}{
+			"hardwareAddr": primaryMAC,
+		},
+		"dhcp":  true, // CRITICAL: preserve public IP via DHCP
+		"vlans": []interface{}{vlanEntry},
 	}
 
 	// Find or create the interfaces list
@@ -896,14 +905,15 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		interfaces = []interface{}{}
 	}
 
-	// Check if an entry for this interface already exists — merge VLAN into it
+	// Check if an entry for this NIC already exists (by deviceSelector MAC) — merge VLAN into it
 	found := false
 	for i, iface := range interfaces {
 		ifMap, ok := iface.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		if ifMap["interface"] == vlanCfg.Interface {
+		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
+		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
 			// Ensure dhcp: true is set
 			ifMap["dhcp"] = true
 			// Add VLAN to existing vlans list (or create new)
@@ -1046,13 +1056,19 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	}
 	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
 
+	// Primary NIC MAC — detected during rescue install, stored in status
+	primaryMAC := hrm.Status.PrimaryMAC
+	if primaryMAC == "" {
+		return ctrl.Result{}, fmt.Errorf("primary NIC MAC not detected — machine must go through rescue install first")
+	}
+
 	// Inject VLAN config if configured on the cluster
 	if hrc.Spec.VLANConfig != nil {
 		internalIP := hrh.Spec.InternalIP
 		if internalIP == "" {
 			return ctrl.Result{}, fmt.Errorf("VLANConfig is set on cluster but host %s has no internalIP", hrh.Name)
 		}
-		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP)
+		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP, primaryMAC)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject VLAN config: %w", err)
 		}
@@ -1082,20 +1098,13 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
 	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.
 	if hrh.Spec.ServerIPv6Net != "" {
-		primaryInterface := hrh.Spec.PrimaryInterface
-		if primaryInterface == "" {
-			primaryInterface = "enp193s0f0np0" // Hetzner AX-series standard NIC
-		}
-		if hrc.Spec.VLANConfig != nil && hrc.Spec.VLANConfig.Interface != "" {
-			primaryInterface = hrc.Spec.VLANConfig.Interface
-		}
-		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryInterface, hrh.Spec.InternalIP)
+		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryMAC, hrh.Spec.InternalIP)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject IPv6 config: %w", err)
 		}
 		logger.Info("Injected IPv6 config into machineconfig",
 			"ipv6Net", hrh.Spec.ServerIPv6Net,
-			"interface", primaryInterface)
+			"mac", primaryMAC)
 	}
 
 	// Inject cluster-level secrets from the Talos secret bundle.

@@ -78,6 +78,12 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	HostRef string `json:"hostRef,omitempty"`
 
+	// PrimaryMAC is the MAC address of the primary NIC, auto-detected during rescue.
+	// Used for Talos deviceSelector — hardware-based NIC identification that works
+	// regardless of OS naming (rescue eth0 vs Talos enp193s0f0np0).
+	// +optional
+	PrimaryMAC string `json:"primaryMAC,omitempty"`
+
 	// FailureReason is a brief string indicating why this machine failed.
 	// +optional
 	FailureReason *string `json:"failureReason,omitempty"`
