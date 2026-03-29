@@ -67,6 +67,12 @@ spec:
                 - host
                 - port
                 type: object
+              dc:
+                description: |-
+                  DC is the Hetzner datacenter identifier (e.g. "fsn1", "nbg1", "hel1").
+                  Used in hostname generation: compute-<dc>-<serverID>.
+                  Defaults to "fsn1" if not set.
+                type: string
               robotSecretRef:
                 description: |-
                   RobotSecretRef references the secret containing Hetzner Robot API credentials.

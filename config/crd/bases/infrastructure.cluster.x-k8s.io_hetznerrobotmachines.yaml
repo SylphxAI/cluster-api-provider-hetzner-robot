@@ -230,6 +230,12 @@ spec:
                   RequeueAfter, so the controller checks this timestamp to skip premature reconciles.
                 format: date-time
                 type: string
+              primaryMAC:
+                description: |-
+                  PrimaryMAC is the MAC address of the primary NIC, auto-detected during rescue.
+                  Used for Talos deviceSelector — hardware-based NIC identification that works
+                  regardless of OS naming (rescue eth0 vs Talos enp193s0f0np0).
+                type: string
               provisioningState:
                 description: ProvisioningState is the current state of provisioning.
                 type: string
