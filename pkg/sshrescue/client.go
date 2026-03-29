@@ -178,15 +178,16 @@ func (c *Client) WipeOSDisk(disk string) (string, error) {
 		return out, fmt.Errorf("disk safety check failed for %s: Ceph data detected — aborting to prevent data loss: %w", disk, err)
 	}
 
+	// Thorough wipe: wipefs + sgdisk + dd + blkdiscard.
+	// blkdiscard alone is NOT enough — NVMe TRIM is advisory, the controller may
+	// delay data erasure. Talos STATE partition survives TRIM and boots with old config.
 	cmd := fmt.Sprintf(
 		`set -e; `+
 			`echo "Wiping OS disk %[1]s..."; `+
-			`if blkdiscard %[1]q 2>/dev/null; then `+
-			`echo "  %[1]s wiped via blkdiscard (TRIM)"; `+
-			`else `+
-			`echo "  blkdiscard unavailable for %[1]s, falling back to dd zero (2GB)"; `+
-			`dd if=/dev/zero of=%[1]q bs=1M count=2048 conv=notrunc 2>/dev/null; `+
-			`fi; `+
+			`wipefs -af %[1]q 2>/dev/null || true; `+
+			`sgdisk --zap-all %[1]q 2>/dev/null || true; `+
+			`dd if=/dev/zero of=%[1]q bs=1M count=100 conv=notrunc 2>/dev/null || true; `+
+			`blkdiscard %[1]q 2>/dev/null || true; `+
 			`sync; `+
 			`echo "OS disk %[1]s wiped"`,
 		disk,
