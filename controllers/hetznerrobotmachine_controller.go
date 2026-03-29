@@ -1227,16 +1227,17 @@ func (r *HetznerRobotMachineReconciler) stateWaitForBoot(
 
 	logger.Info("Talos running after reboot", "ip", serverIP)
 
-	if util.IsControlPlaneMachine(machine) {
-		// CP: proceed to bootstrap etcd
-		hrm.Status.ProvisioningState = infrav1.StateBootstrapping
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-	}
-
-	// Worker: joins cluster automatically via bootstrap token — mark provisioned
+	// Both CP and worker: mark provisioned once Talos is running.
+	// etcd bootstrap/join is CACPPT's responsibility, not CAPHR's.
+	// Workers join via bootstrap token automatically.
+	// CPs join etcd automatically via the endpoints in their machineconfig.
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
-	logger.Info("Worker machine provisioned successfully after boot", "ip", serverIP)
+	if util.IsControlPlaneMachine(machine) {
+		logger.Info("Control plane machine provisioned — CACPPT handles etcd join", "ip", serverIP)
+	} else {
+		logger.Info("Worker machine provisioned successfully after boot", "ip", serverIP)
+	}
 	return ctrl.Result{}, nil
 }
 
