@@ -543,11 +543,14 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		if command -v efibootmgr > /dev/null 2>&1; then
 			PXE_NUM=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
 			if [ -n "$PXE_NUM" ]; then
-				ALL_NUMS=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | tr '\n' ',')
-				OTHER_NUMS=$(echo "$ALL_NUMS" | tr ',' '\n' | grep -v "^${PXE_NUM}$" | tr '\n' ',')
-				NEW_ORDER="${PXE_NUM},${OTHER_NUMS%,}"
+				OTHER=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | grep -v "^${PXE_NUM}$" | paste -sd,)
+				if [ -n "$OTHER" ]; then
+					NEW_ORDER="${PXE_NUM},${OTHER}"
+				else
+					NEW_ORDER="${PXE_NUM}"
+				fi
+				echo "Setting boot order: $NEW_ORDER"
 				efibootmgr -o "$NEW_ORDER" 2>&1
-				echo "EFI boot order fixed post-install: PXE ($PXE_NUM) first"
 			fi
 		fi
 	`); err != nil {
