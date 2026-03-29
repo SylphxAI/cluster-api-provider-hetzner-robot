@@ -700,7 +700,7 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 // Each Hetzner dedicated server gets a /64 subnet. We assign ::1 from that subnet
 // and use fe80::1 as the gateway (Hetzner standard for all dedicated servers).
 // Also sets net.ipv6.conf.all.forwarding=1 (required for pod IPv6 routing).
-func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string) ([]byte, error) {
+func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string, internalIP string) ([]byte, error) {
 	if ipv6Net == "" {
 		return configData, nil
 	}
@@ -787,13 +787,13 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryInterface string
 		extraArgs = make(map[string]interface{})
 		kubelet["extraArgs"] = extraArgs
 	}
-	// Kubelet dual-stack: existing IPv4 nodeIP + new IPv6
-	ipv6Only := strings.TrimSuffix(ipv6Net, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
-	if existingNodeIP, ok := extraArgs["node-ip"].(string); ok && existingNodeIP != "" {
-		// Append IPv6 to existing IPv4
-		extraArgs["node-ip"] = existingNodeIP + "," + ipv6Only
+	// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
+	// Both are needed for K8s to advertise the node as dual-stack.
+	nodeIPv6 := strings.TrimSuffix(ipv6Net, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
+	if internalIP != "" {
+		extraArgs["node-ip"] = internalIP + "," + nodeIPv6
 	} else {
-		extraArgs["node-ip"] = ipv6Only
+		extraArgs["node-ip"] = nodeIPv6
 	}
 
 	return yaml.Marshal(config)
@@ -1089,7 +1089,7 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		if hrc.Spec.VLANConfig != nil && hrc.Spec.VLANConfig.Interface != "" {
 			primaryInterface = hrc.Spec.VLANConfig.Interface
 		}
-		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryInterface)
+		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryInterface, hrh.Spec.InternalIP)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject IPv6 config: %w", err)
 		}
