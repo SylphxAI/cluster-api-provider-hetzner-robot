@@ -794,7 +794,7 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 	if !found {
 		newIface := map[string]interface{}{
 			"deviceSelector": map[string]interface{}{
-				"hardwareAddr": primaryMAC,
+				"hardwareAddr": primaryMAC, "physical": true,
 			},
 			"addresses": []interface{}{ipv6Addr},
 			"routes": []interface{}{
@@ -924,7 +924,7 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 	// Build the interface entry with deviceSelector + dhcp: true + VLAN
 	ifaceEntry := map[string]interface{}{
 		"deviceSelector": map[string]interface{}{
-			"hardwareAddr": primaryMAC,
+			"hardwareAddr": primaryMAC, "physical": true,
 		},
 		"dhcp":  true, // CRITICAL: preserve public IP via DHCP
 		"vlans": []interface{}{vlanEntry},
