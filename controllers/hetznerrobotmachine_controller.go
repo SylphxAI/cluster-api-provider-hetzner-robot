@@ -290,7 +290,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
-		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, hrh, serverID, serverIP)
+		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, serverID, serverIP)
 	case infrav1.StateWaitingForBoot:
 		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
 	case infrav1.StateBootstrapping:
@@ -707,10 +707,11 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
-// injectCiliumStartupTaint adds node.cilium.io/agent-not-ready taint to kubelet config.
-// Cilium removes this taint automatically once initialized. Prevents pod scheduling
-// failures during the 1-2 min Cilium warmup on new nodes.
-func injectCiliumStartupTaint(configData []byte) ([]byte, error) {
+// injectPendingConfigTaint adds the TFC pending-config taint to kubelet config.
+// TFC (Talos Fleet Controller) removes this taint after converging the full machine
+// config (hostname, MAC, IPv6, labels, etc.). Prevents workload scheduling on nodes
+// that haven't received their full configuration yet.
+func injectPendingConfigTaint(configData []byte) ([]byte, error) {
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(configData, &config); err != nil {
 		return nil, err
@@ -734,235 +735,12 @@ func injectCiliumStartupTaint(configData []byte) ([]byte, error) {
 		kubelet["extraArgs"] = extraArgs
 	}
 
-	extraArgs["register-with-taints"] = "node.cilium.io/agent-not-ready=true:NoSchedule"
+	extraArgs["register-with-taints"] = "fleet.talos.dev/pending-config=true:NoSchedule"
 	return yaml.Marshal(config)
 }
 
-// injectIPv6Config adds a global IPv6 address and default route to the primary NIC.
-// Uses deviceSelector by MAC address — works regardless of OS NIC naming
-// (rescue uses eth0, Talos uses enp193s0f0np0, etc.).
-// Also sets kubelet dual-stack nodeIP and IPv6 forwarding sysctl.
-func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, internalIP string) ([]byte, error) {
-	if ipv6Net == "" || primaryMAC == "" {
-		return configData, nil
-	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for IPv6 injection: %w", err)
-	}
 
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
-
-	ipv6Addr := ipv6Net + "1/64" // e.g. 2a01:4f8:271:3b49::1/64
-
-	// Find existing interface by deviceSelector MAC or create new
-	interfaces, _ := network["interfaces"].([]interface{})
-	found := false
-	for _, iface := range interfaces {
-		ifMap, ok := iface.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		// Match by deviceSelector.hardwareAddr or by legacy interface name
-		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-			addrs, _ := ifMap["addresses"].([]interface{})
-			addrs = append(addrs, ipv6Addr)
-			ifMap["addresses"] = addrs
-			routes, _ := ifMap["routes"].([]interface{})
-			routes = append(routes, map[string]interface{}{
-				"network": "::/0",
-				"gateway": "fe80::1",
-			})
-			ifMap["routes"] = routes
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		newIface := map[string]interface{}{
-			"deviceSelector": map[string]interface{}{
-				"hardwareAddr": primaryMAC, "physical": true,
-			},
-			"addresses": []interface{}{ipv6Addr},
-			"routes": []interface{}{
-				map[string]interface{}{
-					"network": "::/0",
-					"gateway": "fe80::1",
-				},
-			},
-		}
-		interfaces = append(interfaces, newIface)
-		network["interfaces"] = interfaces
-	}
-
-	// Set IPv6 forwarding sysctl (required for pod routing)
-	sysctls, ok := machine["sysctls"].(map[string]interface{})
-	if !ok {
-		sysctls = make(map[string]interface{})
-		machine["sysctls"] = sysctls
-	}
-	sysctls["net.ipv6.conf.all.forwarding"] = "1"
-
-	// Set kubelet nodeIP for dual-stack: IPv4 (VLAN) + IPv6.
-	// Without this, kubelet only advertises the IPv4 address and K8s
-	// doesn't know the node has IPv6 connectivity.
-	kubelet, ok := machine["kubelet"].(map[string]interface{})
-	if !ok {
-		kubelet = make(map[string]interface{})
-		machine["kubelet"] = kubelet
-	}
-	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
-	if !ok {
-		extraArgs = make(map[string]interface{})
-		kubelet["extraArgs"] = extraArgs
-	}
-	// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
-	// Both are needed for K8s to advertise the node as dual-stack.
-	nodeIPv6 := strings.TrimSuffix(ipv6Net, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
-	if internalIP != "" {
-		extraArgs["node-ip"] = internalIP + "," + nodeIPv6
-	} else {
-		extraArgs["node-ip"] = nodeIPv6
-	}
-
-	return yaml.Marshal(config)
-}
-
-// injectHostname sets machine.network.hostname in the Talos machineconfig.
-//
-// Format: compute-<dc>-<serverID>
-//   - "compute" is the node type (all K8s nodes are compute; storage nodes aren't in K8s)
-//   - dc: Hetzner datacenter (e.g. "fsn1", "nbg1", "hel1") — from HetznerRobotCluster.Spec.DC
-//   - serverID: Hetzner Robot server ID (immutable hardware identifier)
-//
-// Example: "compute-fsn1-2938104"
-//
-// Role (CP/WK) is deliberately excluded — it can change. Use K8s labels for role.
-// Server IDs are assigned by Hetzner and never reused — zero collision risk at any scale.
-func injectHostname(configData []byte, dc string, serverID int) ([]byte, error) {
-	if serverID == 0 {
-		return configData, nil
-	}
-
-	if dc == "" {
-		dc = "fsn1" // Default to Falkenstein DC1
-	}
-	hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for hostname injection: %w", err)
-	}
-
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
-
-	network["hostname"] = hostname
-	return yaml.Marshal(config)
-}
-
-// injectVLANConfig adds a VLAN interface to the Talos machineconfig.
-// Uses deviceSelector by MAC address for parent NIC identification.
-// Ensures dhcp: true on parent (preserves public IP) and adds VLAN with internal IP.
-func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string) ([]byte, error) {
-	if vlanCfg == nil || internalIP == "" {
-		return configData, nil
-	}
-
-	prefixLen := vlanCfg.PrefixLength
-	if prefixLen == 0 {
-		prefixLen = 24
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for VLAN injection: %w", err)
-	}
-
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
-
-	// Build the VLAN entry
-	vlanEntry := map[string]interface{}{
-		"vlanId": vlanCfg.ID,
-		"addresses": []interface{}{
-			fmt.Sprintf("%s/%d", internalIP, prefixLen),
-		},
-	}
-
-	// Build the interface entry with deviceSelector + dhcp: true + VLAN
-	ifaceEntry := map[string]interface{}{
-		"deviceSelector": map[string]interface{}{
-			"hardwareAddr": primaryMAC, "physical": true,
-		},
-		"dhcp":  true, // CRITICAL: preserve public IP via DHCP
-		"vlans": []interface{}{vlanEntry},
-	}
-
-	// Find or create the interfaces list
-	interfaces, ok := network["interfaces"].([]interface{})
-	if !ok {
-		interfaces = []interface{}{}
-	}
-
-	// Check if an entry for this NIC already exists (by deviceSelector MAC) — merge VLAN into it
-	found := false
-	for i, iface := range interfaces {
-		ifMap, ok := iface.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-			// Ensure dhcp: true is set
-			ifMap["dhcp"] = true
-			// Add VLAN to existing vlans list (or create new)
-			existingVlans, _ := ifMap["vlans"].([]interface{})
-			ifMap["vlans"] = append(existingVlans, vlanEntry)
-			interfaces[i] = ifMap
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		interfaces = append(interfaces, ifaceEntry)
-	}
-
-	network["interfaces"] = interfaces
-	return yaml.Marshal(config)
-}
 
 // injectSecretboxEncryptionSecret replaces cluster.secretboxEncryptionSecret in the
 // machineconfig YAML. CAPT may generate a different encryption key per Machine, but all
@@ -1056,13 +834,20 @@ func injectProviderID(configData []byte, providerID string) ([]byte, error) {
 }
 
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
+// Injects only the minimal config needed for boot + K8s join:
+//   - install disk (Talos requirement)
+//   - TFC pending-config taint (prevents scheduling until TFC converges full config)
+//   - cluster-level secrets (secretbox, SA key — required for CP etcd consistency)
+//   - providerID (CAPI Machine → Node matching)
+//
+// Everything else (hostname, MAC deviceSelector, IPv6, VLAN, labels) is handled
+// by TFC after the node joins.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
 	machine *clusterv1.Machine,
 	cluster *clusterv1.Cluster,
 	hrc *infrav1.HetznerRobotCluster,
-	hrh *infrav1.HetznerRobotHost,
 	serverID int,
 	serverIP string,
 ) (ctrl.Result, error) {
@@ -1087,64 +872,17 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	}
 	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
 
-	// Inject Cilium startup taint: prevents workload scheduling until Cilium is ready.
-	// Cilium agent automatically removes this taint once it's initialized on the node.
-	// Without this, pods scheduled to a new node fail with "unable to create endpoint".
-	bootstrapData, err = injectCiliumStartupTaint(bootstrapData)
+	// Inject TFC pending-config taint: prevents workload scheduling until TFC
+	// converges the full machine config (hostname, MAC, IPv6, labels, VLAN, etc.).
+	// TFC removes this taint after applying the complete config.
+	bootstrapData, err = injectPendingConfigTaint(bootstrapData)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("inject Cilium startup taint: %w", err)
+		return ctrl.Result{}, fmt.Errorf("inject TFC pending-config taint: %w", err)
 	}
 
-	// Primary NIC MAC — detected during rescue install, stored in status
-	primaryMAC := hrm.Status.PrimaryMAC
-	if primaryMAC == "" {
-		return ctrl.Result{}, fmt.Errorf("primary NIC MAC not detected — machine must go through rescue install first")
-	}
-
-	// Inject VLAN config if configured on the cluster
-	if hrc.Spec.VLANConfig != nil {
-		internalIP := hrh.Spec.InternalIP
-		if internalIP == "" {
-			return ctrl.Result{}, fmt.Errorf("VLANConfig is set on cluster but host %s has no internalIP", hrh.Name)
-		}
-		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP, primaryMAC)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("inject VLAN config: %w", err)
-		}
-		logger.Info("Injected VLAN config into machineconfig",
-			"vlanID", hrc.Spec.VLANConfig.ID,
-			"interface", hrc.Spec.VLANConfig.Interface,
-			"internalIP", internalIP)
-	}
-
-	// Inject deterministic hostname: compute-<dc>-<serverID>.
-	// Server ID is immutable (Hetzner hardware ID) — survives IP changes,
-	// DHCP reconfig, and reprovisions. Zero collision risk at any scale.
-	// Role (CP/WK) excluded — use K8s labels. DC from HetznerRobotCluster.
-	{
-		dc := hrc.Spec.DC
-		bootstrapData, err = injectHostname(bootstrapData, dc, serverID)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
-		}
-		if dc == "" {
-			dc = "fsn1"
-		}
-		hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
-		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
-	}
-
-	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
-	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.
-	if hrh.Spec.ServerIPv6Net != "" {
-		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryMAC, hrh.Spec.InternalIP)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("inject IPv6 config: %w", err)
-		}
-		logger.Info("Injected IPv6 config into machineconfig",
-			"ipv6Net", hrh.Spec.ServerIPv6Net,
-			"mac", primaryMAC)
-	}
+	// NOTE: hostname, VLAN, IPv6, MAC deviceSelector, and node labels are NOT
+	// injected here. TFC (Talos Fleet Controller) handles full config convergence
+	// after the node boots and joins K8s with the minimal config.
 
 	// Inject cluster-level secrets from the Talos secret bundle.
 	// CABPT generates unique keys per Machine, but all CP nodes sharing etcd must
