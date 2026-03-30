@@ -414,16 +414,22 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		}
 		// Either Talos is in full mode (stale OS) or not reachable at all.
 		// In both cases, re-activate rescue and wipe.
-		if talos.IsUp(ctx, serverIP) {
-			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, re-activating rescue",
-				"serverID", serverID, "ip", serverIP)
-		} else {
-			logger.Info("Rescue no longer active and nothing reachable, re-activating rescue",
-				"serverID", serverID, "ip", serverIP)
-		}
 		hrm.Status.RetryCount++
 		now := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual BIOS intervention (set PXE as first boot option)",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		if talos.IsUp(ctx, serverIP) {
+			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, re-activating rescue",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		} else {
+			logger.Info("Rescue no longer active and nothing reachable, re-activating rescue",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
@@ -438,13 +444,17 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}
 		// Talos is running in full mode (old/stale config) — rescue didn't take effect.
-		// Re-activate rescue and reset again. Increment retry count to eventually fail
-		// if this keeps happening (boot order issue).
-		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
-			"serverID", serverID, "ip", serverIP)
 		hrm.Status.RetryCount++
-		now := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now
+		now2 := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now2
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: server keeps booting Talos instead of PXE rescue after max retries — needs manual BIOS intervention",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
+			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
