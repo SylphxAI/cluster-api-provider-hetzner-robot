@@ -3,6 +3,7 @@ package controllers
 import (
 	"testing"
 
+	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -51,40 +52,104 @@ func TestInjectInstallDisk_DoesNotOverride(t *testing.T) {
 	}
 }
 
-// ─── injectPendingConfigTaint ──────────────────────────────────────────────
+func TestInjectVLANConfig(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+cluster:
+  clusterName: test
+`)
+	vlanCfg := &infrav1.VLANConfig{
+		ID:           4000,
+		Interface:    "enp193s0f0np0",
+		PrefixLength: 24,
+	}
 
-func TestInjectPendingConfigTaint(t *testing.T) {
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.1")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	if iface["interface"] != "enp193s0f0np0" {
+		t.Errorf("expected interface enp193s0f0np0, got %v", iface["interface"])
+	}
+	if iface["dhcp"] != true {
+		t.Errorf("expected dhcp true, got %v", iface["dhcp"])
+	}
+
+	vlans := iface["vlans"].([]interface{})
+	if len(vlans) != 1 {
+		t.Fatalf("expected 1 vlan, got %d", len(vlans))
+	}
+
+	vlan := vlans[0].(map[string]interface{})
+	if vlan["vlanId"] != 4000 {
+		t.Errorf("expected vlanId 4000, got %v", vlan["vlanId"])
+	}
+
+	addresses := vlan["addresses"].([]interface{})
+	if len(addresses) != 1 || addresses[0] != "10.10.0.1/24" {
+		t.Errorf("expected address 10.10.0.1/24, got %v", addresses)
+	}
+}
+
+func TestInjectVLANConfig_NilConfig(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectPendingConfigTaint(input)
+	result, err := injectVLANConfig(input, nil, "10.10.0.1")
 	if err != nil {
-		t.Fatalf("injectPendingConfigTaint failed: %v", err)
+		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	machine := config["machine"].(map[string]interface{})
-	kubelet := machine["kubelet"].(map[string]interface{})
-	extraArgs := kubelet["extraArgs"].(map[string]interface{})
-	expected := "fleet.talos.dev/pending-config=true:NoSchedule"
-	if extraArgs["register-with-taints"] != expected {
-		t.Errorf("expected register-with-taints %q, got %v", expected, extraArgs["register-with-taints"])
+	if string(result) != string(input) {
+		t.Error("nil VLANConfig should return input unchanged")
 	}
 }
 
-func TestInjectPendingConfigTaint_PreservesExistingConfig(t *testing.T) {
+func TestInjectVLANConfig_EmptyInternalIP(t *testing.T) {
 	input := []byte(`machine:
-  kubelet:
-    extraArgs:
-      rotate-server-certificates: "true"
+  type: controlplane
 `)
-	result, err := injectPendingConfigTaint(input)
+	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0"}
+	result, err := injectVLANConfig(input, vlanCfg, "")
 	if err != nil {
-		t.Fatalf("injectPendingConfigTaint failed: %v", err)
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty internalIP should return input unchanged")
+	}
+}
+
+func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
+	// Existing config already has the interface with some settings
+	input := []byte(`machine:
+  network:
+    interfaces:
+      - interface: enp193s0f0np0
+        mtu: 9000
+`)
+	vlanCfg := &infrav1.VLANConfig{
+		ID:           4000,
+		Interface:    "enp193s0f0np0",
+		PrefixLength: 24,
+	}
+
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.2")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
 
 	var config map[string]interface{}
@@ -93,18 +158,29 @@ func TestInjectPendingConfigTaint_PreservesExistingConfig(t *testing.T) {
 	}
 
 	machine := config["machine"].(map[string]interface{})
-	kubelet := machine["kubelet"].(map[string]interface{})
-	extraArgs := kubelet["extraArgs"].(map[string]interface{})
-	if extraArgs["rotate-server-certificates"] != "true" {
-		t.Errorf("existing kubelet extraArgs should be preserved, got %v", extraArgs)
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	// Should still be 1 interface (merged, not duplicated)
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
 	}
-	expected := "fleet.talos.dev/pending-config=true:NoSchedule"
-	if extraArgs["register-with-taints"] != expected {
-		t.Errorf("expected register-with-taints %q, got %v", expected, extraArgs["register-with-taints"])
+
+	iface := interfaces[0].(map[string]interface{})
+	// Original settings preserved
+	if iface["mtu"] != 9000 {
+		t.Errorf("expected mtu 9000 preserved, got %v", iface["mtu"])
+	}
+	// dhcp: true injected
+	if iface["dhcp"] != true {
+		t.Errorf("expected dhcp true injected, got %v", iface["dhcp"])
+	}
+	// VLAN added
+	vlans := iface["vlans"].([]interface{})
+	if len(vlans) != 1 {
+		t.Fatalf("expected 1 vlan, got %d", len(vlans))
 	}
 }
-
-// ─── injectSecretboxEncryptionSecret ───────────────────────────────────────
 
 func TestInjectSecretboxEncryptionSecret(t *testing.T) {
 	input := []byte(`machine:
@@ -167,8 +243,6 @@ func TestInjectSecretboxEncryptionSecret_NoCluster(t *testing.T) {
 		t.Errorf("expected SOME_KEY, got %v", cluster["secretboxEncryptionSecret"])
 	}
 }
-
-// ─── injectServiceAccountKey ───────────────────────────────────────────────
 
 func TestInjectServiceAccountKey(t *testing.T) {
 	input := []byte(`machine:
@@ -253,6 +327,140 @@ func TestInjectServiceAccountKey_NoServiceAccount(t *testing.T) {
 	sa := cluster["serviceAccount"].(map[string]interface{})
 	if sa["key"] != "SA_KEY_123" {
 		t.Errorf("expected SA_KEY_123, got %v", sa["key"])
+	}
+}
+
+func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
+	input := []byte(`machine: {}`)
+	vlanCfg := &infrav1.VLANConfig{
+		ID:        4000,
+		Interface: "eth0",
+		// PrefixLength not set — should default to 24
+	}
+
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.3")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+	iface := interfaces[0].(map[string]interface{})
+	vlans := iface["vlans"].([]interface{})
+	vlan := vlans[0].(map[string]interface{})
+	addresses := vlan["addresses"].([]interface{})
+	if addresses[0] != "10.10.0.3/24" {
+		t.Errorf("expected /24 default prefix, got %v", addresses[0])
+	}
+}
+
+// ─── injectIPv6Config ──────────────────────────────────────────────────────
+
+func TestInjectIPv6Config(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	if iface["interface"] != "enp193s0f0np0" {
+		t.Errorf("expected interface enp193s0f0np0, got %v", iface["interface"])
+	}
+
+	addrs := iface["addresses"].([]interface{})
+	if len(addrs) != 1 || addrs[0] != "2a01:4f8:271:3b49::1/64" {
+		t.Errorf("expected 2a01:4f8:271:3b49::1/64, got %v", addrs)
+	}
+
+	routes := iface["routes"].([]interface{})
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	route := routes[0].(map[string]interface{})
+	if route["network"] != "::/0" || route["gateway"] != "fe80::1" {
+		t.Errorf("expected ::/0 via fe80::1, got %v", route)
+	}
+
+	// Verify sysctl
+	sysctls := machine["sysctls"].(map[string]interface{})
+	if sysctls["net.ipv6.conf.all.forwarding"] != "1" {
+		t.Errorf("expected ipv6 forwarding sysctl, got %v", sysctls)
+	}
+}
+
+func TestInjectIPv6Config_Empty(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty ipv6Net should return input unchanged")
+	}
+}
+
+func TestInjectIPv6Config_MergeExistingInterface(t *testing.T) {
+	input := []byte(`machine:
+  network:
+    interfaces:
+      - interface: enp193s0f0np0
+        dhcp: true
+        addresses:
+          - 10.0.0.1/24
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8::", "enp193s0f0np0")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	addrs := iface["addresses"].([]interface{})
+	// Should have both existing IPv4 + new IPv6
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 addresses (IPv4+IPv6), got %d: %v", len(addrs), addrs)
+	}
+	if addrs[0] != "10.0.0.1/24" {
+		t.Errorf("expected existing IPv4 preserved, got %v", addrs[0])
+	}
+	if addrs[1] != "2a01:4f8::1/64" {
+		t.Errorf("expected IPv6 appended, got %v", addrs[1])
 	}
 }
 
