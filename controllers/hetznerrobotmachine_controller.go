@@ -386,8 +386,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			client := sshrescue.New(serverIP, privateKey)
 			if connErr := client.Connect(); connErr == nil {
 				defer client.Close()
-				// Rescue systems have /etc/hetzner-rescue or specific kernel
-				out, _ := client.Run("test -f /etc/hetzner-rescue 2>/dev/null && echo RESCUE || (uname -r | grep -q rescue && echo RESCUE || echo NOT_RESCUE)")
+				// Hetzner rescue has hostname "rescue" and /etc/hetzner-build
+				out, _ := client.Run("([ \"$(hostname)\" = \"rescue\" ] || test -f /etc/hetzner-build) && echo RESCUE || echo NOT_RESCUE")
 				if strings.TrimSpace(out) == "RESCUE" {
 					logger.Info("Rescue SSH reachable and verified", "ip", serverIP)
 					hrm.Status.ProvisioningState = infrav1.StateInRescue
