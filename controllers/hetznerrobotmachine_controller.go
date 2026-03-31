@@ -377,12 +377,42 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	}
 
 	// Priority 2: Check if rescue SSH is already up.
-	// This handles the case where rescue was consumed (active→false) but the server
-	// successfully booted into rescue — SSH open means we can proceed with install.
+	// IMPORTANT: Must verify it's actually rescue, not a pre-existing OS (Debian/Talos).
+	// A pre-existing OS has SSH on port 22 too — treating it as rescue causes installer
+	// failures (installer expects rescue environment, not a running OS).
 	if sshrescue.IsReachable(serverIP) {
-		logger.Info("Rescue SSH reachable", "ip", serverIP)
-		hrm.Status.ProvisioningState = infrav1.StateInRescue
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		privateKey, keyErr := r.getSSHPrivateKey(ctx, hrc)
+		if keyErr == nil {
+			client := sshrescue.New(serverIP, privateKey)
+			if connErr := client.Connect(); connErr == nil {
+				defer client.Close()
+				// Rescue systems have /etc/hetzner-rescue or specific kernel
+				out, _ := client.Run("test -f /etc/hetzner-rescue 2>/dev/null && echo RESCUE || (uname -r | grep -q rescue && echo RESCUE || echo NOT_RESCUE)")
+				if strings.TrimSpace(out) == "RESCUE" {
+					logger.Info("Rescue SSH reachable and verified", "ip", serverIP)
+					hrm.Status.ProvisioningState = infrav1.StateInRescue
+					return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+				}
+				// SSH reachable but NOT rescue — server booted existing OS.
+				// Fix EFI boot order to PXE first, then reboot into rescue.
+				logger.Info("SSH reachable but not rescue (existing OS detected), fixing EFI boot order",
+					"ip", serverIP)
+				_, _ = client.Run(`
+					if command -v efibootmgr > /dev/null 2>&1; then
+						mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
+						mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+						for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+							efibootmgr -b "$entry" -B 2>/dev/null
+						done
+					fi
+					nohup bash -c 'sleep 1 && reboot' &>/dev/null &
+				`)
+				logger.Info("Rebooted existing OS with PXE-only EFI, should enter rescue on next boot", "ip", serverIP)
+				return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
+			}
+		}
+		// SSH reachable but can't authenticate — might be rescue with wrong key or existing OS
+		logger.Info("SSH port open but cannot authenticate, waiting for rescue", "ip", serverIP)
 	}
 
 	// Priority 3: Check Robot API rescue status.
