@@ -520,44 +520,6 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
-	// Verify the system is actually rescue before installing.
-	// A pre-existing OS (Debian from cephadm, old Talos, etc.) has SSH on port 22
-	// but is NOT rescue — installing Talos on a running OS fails silently (exit 1).
-	{
-		privateKey, keyErr := r.getSSHPrivateKey(ctx, hrc)
-		if keyErr == nil {
-			verifyClient := sshrescue.New(serverIP, privateKey)
-			if connErr := verifyClient.Connect(); connErr == nil {
-				out, _ := verifyClient.Run("([ \"$(hostname)\" = \"rescue\" ] || test -f /etc/hetzner-build) && echo RESCUE || echo NOT_RESCUE")
-				verifyClient.Close()
-				if strings.TrimSpace(out) != "RESCUE" {
-					logger.Info("SSH reachable but NOT rescue (existing OS), fixing EFI and rebooting into rescue",
-						"ip", serverIP, "hostname", strings.TrimSpace(out))
-					// Fix EFI boot order — delete non-PXE entries so next boot goes to PXE rescue
-					fixClient := sshrescue.New(serverIP, privateKey)
-					if fixErr := fixClient.Connect(); fixErr == nil {
-						_, _ = fixClient.Run(`
-							if command -v efibootmgr > /dev/null 2>&1; then
-								mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
-								mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
-								for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
-									efibootmgr -b "$entry" -B 2>/dev/null
-								done
-							fi
-							nohup bash -c 'sleep 1 && reboot' &>/dev/null &
-						`)
-						fixClient.Close()
-					}
-					// Re-activate rescue for the PXE boot
-					sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
-					_, _ = robotClient.ActivateRescue(ctx, serverID, sshFingerprint)
-					hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
-					return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
-				}
-			}
-		}
-	}
-
 	logger.Info("Installing Talos via rescue SSH", "ip", serverIP)
 
 	// Get private key
@@ -848,7 +810,10 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		machine["network"] = network
 	}
 
-	ipv6Addr := ipv6Net + "1/64" // e.g. 2a01:4f8:271:3b49::1/64
+	// ipv6Net from Hetzner API may include prefix length (e.g. "2a01:4f8:271:3b49::/64").
+	// Strip it before constructing the host address.
+	ipv6Prefix := strings.Split(ipv6Net, "/")[0] // "2a01:4f8:271:3b49::"
+	ipv6Addr := ipv6Prefix + "1/64"              // "2a01:4f8:271:3b49::1/64"
 
 	// Find existing interface by deviceSelector MAC or create new
 	interfaces, _ := network["interfaces"].([]interface{})
@@ -915,7 +880,7 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 	}
 	// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
 	// Both are needed for K8s to advertise the node as dual-stack.
-	nodeIPv6 := strings.TrimSuffix(ipv6Net, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
+	nodeIPv6 := strings.TrimSuffix(ipv6Prefix, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
 	if internalIP != "" {
 		extraArgs["node-ip"] = internalIP + "," + nodeIPv6
 	} else {
