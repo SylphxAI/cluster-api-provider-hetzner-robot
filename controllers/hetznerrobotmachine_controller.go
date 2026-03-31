@@ -889,24 +889,27 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 
 // injectHostname sets machine.network.hostname in the Talos machineconfig.
 //
-// Format: compute-<dc>-<serverID>
-//   - "compute" is the node type (all K8s nodes are compute; storage nodes aren't in K8s)
-//   - dc: Hetzner datacenter (e.g. "fsn1", "nbg1", "hel1") — from HetznerRobotCluster.Spec.DC
+// Format: <role>-<dc>-<serverID>
+//   - role: from HetznerRobotHost label "role" (e.g. "compute", "storage")
+//     Defaults to "compute" for control-plane and worker roles.
+//   - dc: Hetzner datacenter (e.g. "fsn1") — from HetznerRobotCluster.Spec.DC
 //   - serverID: Hetzner Robot server ID (immutable hardware identifier)
 //
-// Example: "compute-fsn1-2938104"
-//
-// Role (CP/WK) is deliberately excluded — it can change. Use K8s labels for role.
-// Server IDs are assigned by Hetzner and never reused — zero collision risk at any scale.
-func injectHostname(configData []byte, dc string, serverID int) ([]byte, error) {
+// Examples: "compute-fsn1-2938104", "storage-fsn1-2965124"
+func injectHostname(configData []byte, dc string, serverID int, hostRole string) ([]byte, error) {
 	if serverID == 0 {
 		return configData, nil
 	}
 
 	if dc == "" {
-		dc = "fsn1" // Default to Falkenstein DC1
+		dc = "fsn1"
 	}
-	hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
+	// Map host role label to hostname prefix
+	prefix := "compute"
+	if hostRole == "storage" {
+		prefix = "storage"
+	}
+	hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
 
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(configData, &config); err != nil {
@@ -1163,20 +1166,24 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"internalIP", internalIP)
 	}
 
-	// Inject deterministic hostname: compute-<dc>-<serverID>.
-	// Server ID is immutable (Hetzner hardware ID) — survives IP changes,
-	// DHCP reconfig, and reprovisions. Zero collision risk at any scale.
-	// Role (CP/WK) excluded — use K8s labels. DC from HetznerRobotCluster.
+	// Inject deterministic hostname: <role>-<dc>-<serverID>.
+	// Role from HetznerRobotHost label (storage → "storage-", else "compute-").
+	// Server ID is immutable (Hetzner hardware ID) — zero collision risk.
 	{
 		dc := hrc.Spec.DC
-		bootstrapData, err = injectHostname(bootstrapData, dc, serverID)
+		hostRole := hrh.Labels["role"]
+		bootstrapData, err = injectHostname(bootstrapData, dc, serverID, hostRole)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
 		}
 		if dc == "" {
 			dc = "fsn1"
 		}
-		hostname := fmt.Sprintf("compute-%s-%d", dc, serverID)
+		prefix := "compute"
+		if hostRole == "storage" {
+			prefix = "storage"
+		}
+		hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
 		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
 	}
 
