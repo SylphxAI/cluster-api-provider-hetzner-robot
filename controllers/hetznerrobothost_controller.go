@@ -144,11 +144,11 @@ func (r *HetznerRobotHostReconciler) getRobotClient(ctx context.Context, host *i
 
 	// Read Robot API credentials from the referenced secret
 	secret := &corev1.Secret{}
-	ns := hrc.Spec.RobotCredentialsRef.Namespace
+	ns := hrc.Spec.RobotSecretRef.Namespace
 	if ns == "" {
 		ns = hrc.Namespace
 	}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: hrc.Spec.RobotCredentialsRef.Name}, secret); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: hrc.Spec.RobotSecretRef.Name}, secret); err != nil {
 		return nil, fmt.Errorf("get robot credentials secret: %w", err)
 	}
 
