@@ -49,13 +49,14 @@ func NewWithBaseURL(username, password, baseURL string) *Client {
 
 // ServerInfo contains information about a server.
 type ServerInfo struct {
-	ServerNumber int    `json:"server_number"`
-	ServerName   string `json:"server_name"`
-	ServerIP     string `json:"server_ip"`
-	Product      string `json:"product"`
-	Datacenter   string `json:"dc"`
-	Status       string `json:"status"`
-	Cancelled    bool   `json:"cancelled"`
+	ServerNumber  int    `json:"server_number"`
+	ServerName    string `json:"server_name"`
+	ServerIP      string `json:"server_ip"`
+	ServerIPv6Net string `json:"server_ipv6_net"`
+	Product       string `json:"product"`
+	Datacenter    string `json:"dc"`
+	Status        string `json:"status"`
+	Cancelled     bool   `json:"cancelled"`
 }
 
 // RescueInfo contains information about the rescue system.

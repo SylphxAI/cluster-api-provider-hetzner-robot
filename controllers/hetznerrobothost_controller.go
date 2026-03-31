@@ -2,7 +2,10 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -12,6 +15,7 @@ import (
 	"sigs.k8s.io/cluster-api/util/patch"
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
+	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/robot"
 )
 
 // HetznerRobotHostReconciler reconciles HetznerRobotHost objects.
@@ -59,7 +63,39 @@ func (r *HetznerRobotHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Initialise State to Available if not set
 	if host.Status.State == "" {
 		host.Status.State = infrav1.HostStateAvailable
-		return ctrl.Result{}, nil
+	}
+
+	// Auto-detect serverIP and serverIPv6Net from Hetzner Robot API if not set.
+	// Only requires serverID in spec — everything else is resolved automatically.
+	if (host.Spec.ServerIP == "" || host.Spec.ServerIPv6Net == "") && host.Spec.ServerID > 0 {
+		robotClient, err := r.getRobotClient(ctx, host)
+		if err != nil {
+			logger.Error(err, "Failed to create Robot client for auto-detect")
+		} else {
+			serverInfo, err := robotClient.GetServer(ctx, host.Spec.ServerID)
+			if err != nil {
+				logger.Error(err, "Failed to auto-detect server info from Hetzner API",
+					"serverID", host.Spec.ServerID)
+			} else {
+				changed := false
+				if host.Spec.ServerIP == "" && serverInfo.ServerIP != "" {
+					host.Spec.ServerIP = serverInfo.ServerIP
+					changed = true
+				}
+				if host.Spec.ServerIPv6Net == "" && serverInfo.ServerIPv6Net != "" {
+					// Hetzner returns "2a01:4f8:2b04:201::" — normalize to CIDR /64
+					ipv6 := strings.TrimSuffix(serverInfo.ServerIPv6Net, "::")
+					host.Spec.ServerIPv6Net = fmt.Sprintf("%s::/64", ipv6)
+					changed = true
+				}
+				if changed {
+					logger.Info("Auto-detected server info from Hetzner API",
+						"serverID", host.Spec.ServerID,
+						"serverIP", host.Spec.ServerIP,
+						"serverIPv6Net", host.Spec.ServerIPv6Net)
+				}
+			}
+		}
 	}
 
 	// Handle deletion
@@ -79,6 +115,47 @@ func (r *HetznerRobotHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// getRobotClient creates a Robot API client by finding the HetznerRobotCluster
+// that owns this host (via cluster-name label) and reading its credentials secret.
+func (r *HetznerRobotHostReconciler) getRobotClient(ctx context.Context, host *infrav1.HetznerRobotHost) (*robot.Client, error) {
+	clusterName := host.Labels["cluster.x-k8s.io/cluster-name"]
+	if clusterName == "" {
+		return nil, fmt.Errorf("host %s has no cluster-name label", host.Name)
+	}
+
+	// Find the HetznerRobotCluster in the same namespace
+	hrcList := &infrav1.HetznerRobotClusterList{}
+	if err := r.List(ctx, hrcList, client.InNamespace(host.Namespace)); err != nil {
+		return nil, fmt.Errorf("list HetznerRobotClusters: %w", err)
+	}
+
+	var hrc *infrav1.HetznerRobotCluster
+	for i := range hrcList.Items {
+		if hrcList.Items[i].Labels["cluster.x-k8s.io/cluster-name"] == clusterName {
+			hrc = &hrcList.Items[i]
+			break
+		}
+	}
+	if hrc == nil {
+		return nil, fmt.Errorf("no HetznerRobotCluster found for cluster %s", clusterName)
+	}
+
+	// Read Robot API credentials from the referenced secret
+	secret := &corev1.Secret{}
+	ns := hrc.Spec.RobotCredentialsRef.Namespace
+	if ns == "" {
+		ns = hrc.Namespace
+	}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: hrc.Spec.RobotCredentialsRef.Name}, secret); err != nil {
+		return nil, fmt.Errorf("get robot credentials secret: %w", err)
+	}
+
+	return robot.New(
+		string(secret.Data["robot-user"]),
+		string(secret.Data["robot-password"]),
+	), nil
 }
 
 func (r *HetznerRobotHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
