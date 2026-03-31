@@ -587,33 +587,36 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 
 	logger.Info("Talos image written, fixing EFI boot order post-install", "ip", serverIP)
 
-	// Fix EFI boot order after Talos install: Talos FIRST, PXE LAST.
-	// The installed OS must be the primary boot entry. PXE is only a fallback
-	// for rescue (which requires explicit activation via Hetzner API).
-	// Previous bug: PXE was set first, causing rescue boot loops when CAPHR's
-	// retry logic re-activated rescue before the server could boot Talos.
+	// Fix EFI boot order after Talos install: delete ALL non-Talos, non-PXE
+	// entries (e.g. old Debian "UEFI OS"), then set Talos FIRST, PXE LAST.
+	// Some Hetzner BIOS firmwares ignore BootOrder and use their own NVMe
+	// boot priority — deleting competing entries is the only reliable fix.
 	if out, err := sshClient.Run(`
 		if command -v efibootmgr > /dev/null 2>&1; then
 			# Mount efivars read-write (rescue mounts it read-only by default)
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
+			echo "Before cleanup:"
+			efibootmgr
+
+			# Delete ALL boot entries except PXE/Network and Talos
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6\|talos' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+				echo "Deleting non-Talos/non-PXE entry: Boot${entry}"
+				efibootmgr -b "$entry" -B 2>/dev/null || true
+			done
+
+			# Set boot order: Talos first, PXE last
+			TALOS_NUM=$(efibootmgr | grep -i 'Talos' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
 			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			TALOS_NUMS=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | while read num; do
-				echo "$PXE_NUMS" | grep -q "$num" || echo "$num"
-			done | paste -sd,)
-			if [ -n "$TALOS_NUMS" ] && [ -n "$PXE_NUMS" ]; then
-				NEW_ORDER="${TALOS_NUMS},${PXE_NUMS}"
-			elif [ -n "$TALOS_NUMS" ]; then
-				NEW_ORDER="${TALOS_NUMS}"
-			elif [ -n "$PXE_NUMS" ]; then
-				NEW_ORDER="${PXE_NUMS}"
+			if [ -n "$TALOS_NUM" ] && [ -n "$PXE_NUMS" ]; then
+				efibootmgr -o "${TALOS_NUM},${PXE_NUMS}" 2>&1
+			elif [ -n "$TALOS_NUM" ]; then
+				efibootmgr -o "${TALOS_NUM}" 2>&1
 			fi
-			if [ -n "$NEW_ORDER" ]; then
-				echo "Setting boot order (OS first, PXE last): $NEW_ORDER"
-				efibootmgr -o "$NEW_ORDER" 2>&1
-				echo "Verify: $(efibootmgr | grep BootOrder)"
-			fi
+
+			echo "After cleanup:"
+			efibootmgr
 		fi
 	`); err != nil {
 		logger.Info("Post-install EFI fix failed (non-fatal)", "error", err, "output", out)
