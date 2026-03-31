@@ -4,7 +4,7 @@ on:
     branches: [main]
 jobs:
   build:
-    runs-on: [self-hosted, sylphx, linux, standard]
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
