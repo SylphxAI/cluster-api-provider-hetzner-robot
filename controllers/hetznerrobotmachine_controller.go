@@ -557,24 +557,30 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 
 	logger.Info("Talos image written, fixing EFI boot order post-install", "ip", serverIP)
 
-	// Fix EFI boot order AGAIN after Talos install. The Talos installer writes its own
-	// EFI boot entry (shimx64.efi) which takes priority over PXE. Without this second
-	// fix, the server won't PXE boot on future rescue attempts.
+	// Fix EFI boot order after Talos install: Talos FIRST, PXE LAST.
+	// The installed OS must be the primary boot entry. PXE is only a fallback
+	// for rescue (which requires explicit activation via Hetzner API).
+	// Previous bug: PXE was set first, causing rescue boot loops when CAPHR's
+	// retry logic re-activated rescue before the server could boot Talos.
 	if out, err := sshClient.Run(`
 		if command -v efibootmgr > /dev/null 2>&1; then
 			# Mount efivars read-write (rescue mounts it read-only by default)
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
-			PXE_NUM=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | head -1 | grep -oP 'Boot\K[0-9A-Fa-f]+')
-			if [ -n "$PXE_NUM" ]; then
-				OTHER=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | grep -v "^${PXE_NUM}$" | paste -sd,)
-				if [ -n "$OTHER" ]; then
-					NEW_ORDER="${PXE_NUM},${OTHER}"
-				else
-					NEW_ORDER="${PXE_NUM}"
-				fi
-				echo "Setting boot order: $NEW_ORDER"
+			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
+			TALOS_NUMS=$(efibootmgr | grep -oP 'Boot\K[0-9A-Fa-f]+(?=\*)' | while read num; do
+				echo "$PXE_NUMS" | grep -q "$num" || echo "$num"
+			done | paste -sd,)
+			if [ -n "$TALOS_NUMS" ] && [ -n "$PXE_NUMS" ]; then
+				NEW_ORDER="${TALOS_NUMS},${PXE_NUMS}"
+			elif [ -n "$TALOS_NUMS" ]; then
+				NEW_ORDER="${TALOS_NUMS}"
+			elif [ -n "$PXE_NUMS" ]; then
+				NEW_ORDER="${PXE_NUMS}"
+			fi
+			if [ -n "$NEW_ORDER" ]; then
+				echo "Setting boot order (OS first, PXE last): $NEW_ORDER"
 				efibootmgr -o "$NEW_ORDER" 2>&1
 				echo "Verify: $(efibootmgr | grep BootOrder)"
 			fi
