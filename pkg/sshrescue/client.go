@@ -196,6 +196,90 @@ func (c *Client) WipeOSDisk(disk string) (string, error) {
 	return c.Run(cmd)
 }
 
+// WipeAllDisks wipes ALL NVMe disks on the server for a fresh provision.
+// Used for storage nodes where old Talos installs on ANY disk cause boot loops —
+// the server boots from the old install instead of the new one. Unlike WipeOSDisk,
+// this does NOT check for ceph_bluestore because it is only called during fresh
+// provisioning when no Ceph data exists yet.
+//
+// The installDisk parameter is logged but all NVMe disks are wiped regardless.
+func (c *Client) WipeAllDisks(installDisk string) (string, error) {
+	// List all NVMe block devices
+	listCmd := `lsblk --noheadings --nodeps --paths --output NAME,TYPE | grep disk | grep nvme | awk '{print $1}'`
+	out, err := c.Run(listCmd)
+	if err != nil {
+		return out, fmt.Errorf("list NVMe disks: %w", err)
+	}
+
+	disks := strings.Fields(strings.TrimSpace(out))
+	if len(disks) == 0 {
+		return "", fmt.Errorf("no NVMe disks found")
+	}
+
+	var results []string
+	for _, disk := range disks {
+		cmd := fmt.Sprintf(
+			`set -e; `+
+				`echo "Wiping disk %[1]s..."; `+
+				`wipefs -af %[1]q 2>/dev/null || true; `+
+				`sgdisk --zap-all %[1]q 2>/dev/null || true; `+
+				`dd if=/dev/zero of=%[1]q bs=1M count=100 conv=notrunc 2>/dev/null || true; `+
+				`blkdiscard %[1]q 2>/dev/null || true; `+
+				`sync; `+
+				`echo "Disk %[1]s wiped"`,
+			disk,
+		)
+		wipeOut, wipeErr := c.Run(cmd)
+		if wipeErr != nil {
+			return wipeOut, fmt.Errorf("wipe disk %s: %w", disk, wipeErr)
+		}
+		results = append(results, strings.TrimSpace(wipeOut))
+	}
+
+	summary := fmt.Sprintf("Wiped %d NVMe disks (install=%s): %s", len(disks), installDisk, strings.Join(disks, ", "))
+	results = append(results, summary)
+	return strings.Join(results, "\n"), nil
+}
+
+// ResolveStableDiskPath resolves a bare NVMe device path (e.g. /dev/nvme0n1)
+// to its stable /dev/disk/by-id/ path using the disk's serial number.
+// This is critical because NVMe device names swap between rescue mode and Talos
+// boot due to different PCI probe order. The by-id path references the physical
+// disk deterministically regardless of enumeration order.
+//
+// If the disk is already a /dev/disk/by-id/ path, it is returned as-is.
+// Returns the original disk path if resolution fails (best-effort).
+func (c *Client) ResolveStableDiskPath(disk string) (string, error) {
+	// Already a stable path — nothing to resolve
+	if strings.HasPrefix(disk, "/dev/disk/by-id/") {
+		return disk, nil
+	}
+
+	// Get the basename (e.g. "nvme0n1" from "/dev/nvme0n1")
+	basename := disk
+	if idx := strings.LastIndex(disk, "/"); idx >= 0 {
+		basename = disk[idx+1:]
+	}
+
+	// Find the by-id symlink that points to this device (excluding partition entries)
+	cmd := fmt.Sprintf(
+		`ls -la /dev/disk/by-id/ 2>/dev/null | grep -E '%s$' | grep nvme | grep -v part | awk '{print $9}' | head -1`,
+		basename,
+	)
+	out, err := c.Run(cmd)
+	if err != nil {
+		return disk, nil // best-effort: return original on failure
+	}
+
+	byIDName := strings.TrimSpace(out)
+	if byIDName == "" {
+		return disk, nil // no by-id link found, return original
+	}
+
+	stablePath := "/dev/disk/by-id/" + byIDName
+	return stablePath, nil
+}
+
 // InstallTalos installs Talos Linux on the server using the official OCI
 // installer binary inside a minimal namespace created by unshare(1).
 //

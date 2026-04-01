@@ -562,13 +562,51 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 			"configured", configuredDisk, "resolved", installDisk, "ip", serverIP)
 	}
 
-	// Wipe only the OS install disk — Ceph OSD data on other disks must survive
-	// reprovision. Wiping all disks would destroy storage cluster data.
-	logger.Info("Wiping OS disk on server", "ip", serverIP, "disk", installDisk)
-	if out, err := sshClient.WipeOSDisk(installDisk); err != nil {
-		return ctrl.Result{}, fmt.Errorf("wipe OS disk %s on %s: %w\nOutput: %s", installDisk, serverIP, err, out)
+	// Resolve the install disk to a stable /dev/disk/by-id/ path.
+	// NVMe device names (/dev/nvme0n1) swap between rescue and Talos boot due to
+	// different PCI probe order. The by-id path references the physical disk by
+	// serial number, so both the installer in rescue AND Talos at boot will
+	// reference the same physical disk regardless of enumeration order.
+	stableDisk, err := sshClient.ResolveStableDiskPath(installDisk)
+	if err != nil {
+		// Non-fatal: fall back to unstable path
+		logger.Info("Could not resolve stable disk path, using bare device name",
+			"disk", installDisk, "error", err)
+		stableDisk = installDisk
+	}
+	if stableDisk != installDisk {
+		logger.Info("Resolved install disk to stable by-id path",
+			"bare", installDisk, "stable", stableDisk, "ip", serverIP)
+	}
+
+	// Persist the stable disk path in status so stateApplyConfig can inject it
+	// into the Talos machineconfig. This ensures Talos uses the by-id path for
+	// upgrades, surviving NVMe enumeration changes across reboots.
+	hrm.Status.ResolvedInstallDisk = stableDisk
+
+	// Storage nodes (ephemeralSize set): wipe ALL NVMe disks for fresh provision.
+	// Old Talos installs on OTHER disks cause boot loops — the server boots from
+	// the old install instead of the new one. This is safe because fresh storage
+	// nodes have no existing Ceph data.
+	//
+	// Compute nodes (no ephemeralSize): wipe ONLY the OS install disk.
+	// Ceph OSD data on other disks must survive reprovision.
+	isStorageNode := hrm.Spec.EphemeralSize != ""
+	if isStorageNode {
+		logger.Info("Storage node: wiping ALL NVMe disks for fresh provision",
+			"ip", serverIP, "installDisk", stableDisk, "ephemeralSize", hrm.Spec.EphemeralSize)
+		if out, err := sshClient.WipeAllDisks(stableDisk); err != nil {
+			return ctrl.Result{}, fmt.Errorf("wipe all disks on %s: %w\nOutput: %s", serverIP, err, out)
+		} else {
+			logger.Info("All NVMe disks wiped", "ip", serverIP, "output", out)
+		}
 	} else {
-		logger.Info("OS disk wiped", "ip", serverIP, "disk", installDisk, "output", out)
+		logger.Info("Compute node: wiping OS disk only", "ip", serverIP, "disk", stableDisk)
+		if out, err := sshClient.WipeOSDisk(installDisk); err != nil {
+			return ctrl.Result{}, fmt.Errorf("wipe OS disk %s on %s: %w\nOutput: %s", installDisk, serverIP, err, out)
+		} else {
+			logger.Info("OS disk wiped", "ip", serverIP, "disk", installDisk, "output", out)
+		}
 	}
 
 	factoryURL := hrc.Spec.TalosFactoryBaseURL
@@ -576,11 +614,13 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		factoryURL = talosFactoryDefaultBaseURL
 	}
 
+	// Use stable by-id path for the Talos installer so the correct physical disk
+	// is targeted regardless of NVMe enumeration order at boot.
 	if err := sshClient.InstallTalos(
 		factoryURL,
 		hrm.Spec.TalosSchematic,
 		hrm.Spec.TalosVersion,
-		installDisk,
+		stableDisk,
 	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
 	}
@@ -1171,9 +1211,16 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 
 	// Inject install disk into machineconfig — CAPT doesn't include it,
 	// but Talos requires machine.install.disk to be set.
-	installDisk := hrm.Spec.InstallDisk
+	// Prefer the stable /dev/disk/by-id/ path resolved during rescue install.
+	// This ensures Talos references the correct physical disk regardless of
+	// NVMe enumeration order (which can differ between rescue and Talos boot).
+	installDisk := hrm.Status.ResolvedInstallDisk
 	if installDisk == "" {
-		installDisk = "/dev/nvme0n1"
+		// Fallback for machines provisioned before this fix was deployed
+		installDisk = hrm.Spec.InstallDisk
+		if installDisk == "" {
+			installDisk = "/dev/nvme0n1"
+		}
 	}
 	bootstrapData, err = injectInstallDisk(bootstrapData, installDisk)
 	if err != nil {

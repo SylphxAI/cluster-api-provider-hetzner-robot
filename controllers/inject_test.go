@@ -64,7 +64,7 @@ cluster:
 		PrefixLength: 24,
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.1")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.1", "aa:bb:cc:dd:ee:ff")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -83,8 +83,10 @@ cluster:
 	}
 
 	iface := interfaces[0].(map[string]interface{})
-	if iface["interface"] != "enp193s0f0np0" {
-		t.Errorf("expected interface enp193s0f0np0, got %v", iface["interface"])
+	// injectVLANConfig uses deviceSelector by MAC, not interface name
+	selector := iface["deviceSelector"].(map[string]interface{})
+	if selector["hardwareAddr"] != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("expected deviceSelector.hardwareAddr aa:bb:cc:dd:ee:ff, got %v", selector["hardwareAddr"])
 	}
 	if iface["dhcp"] != true {
 		t.Errorf("expected dhcp true, got %v", iface["dhcp"])
@@ -110,7 +112,7 @@ func TestInjectVLANConfig_NilConfig(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectVLANConfig(input, nil, "10.10.0.1")
+	result, err := injectVLANConfig(input, nil, "10.10.0.1", "aa:bb:cc:dd:ee:ff")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -124,7 +126,7 @@ func TestInjectVLANConfig_EmptyInternalIP(t *testing.T) {
   type: controlplane
 `)
 	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0"}
-	result, err := injectVLANConfig(input, vlanCfg, "")
+	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -134,11 +136,12 @@ func TestInjectVLANConfig_EmptyInternalIP(t *testing.T) {
 }
 
 func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
-	// Existing config already has the interface with some settings
+	// Existing config already has the interface matched by deviceSelector MAC
 	input := []byte(`machine:
   network:
     interfaces:
-      - interface: enp193s0f0np0
+      - deviceSelector:
+          hardwareAddr: "aa:bb:cc:dd:ee:ff"
         mtu: 9000
 `)
 	vlanCfg := &infrav1.VLANConfig{
@@ -147,7 +150,7 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 		PrefixLength: 24,
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.2")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.2", "aa:bb:cc:dd:ee:ff")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -338,7 +341,7 @@ func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
 		// PrefixLength not set — should default to 24
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.3")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.3", "aa:bb:cc:dd:ee:ff")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -366,7 +369,7 @@ func TestInjectIPv6Config(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "enp193s0f0np0")
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
 	if err != nil {
 		t.Fatalf("injectIPv6Config failed: %v", err)
 	}
@@ -385,8 +388,10 @@ func TestInjectIPv6Config(t *testing.T) {
 	}
 
 	iface := interfaces[0].(map[string]interface{})
-	if iface["interface"] != "enp193s0f0np0" {
-		t.Errorf("expected interface enp193s0f0np0, got %v", iface["interface"])
+	// Uses deviceSelector by MAC, not interface name
+	deviceSelector := iface["deviceSelector"].(map[string]interface{})
+	if deviceSelector == nil {
+		t.Errorf("expected deviceSelector, got nil")
 	}
 
 	addrs := iface["addresses"].([]interface{})
@@ -414,7 +419,7 @@ func TestInjectIPv6Config_Empty(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectIPv6Config(input, "", "enp193s0f0np0")
+	result, err := injectIPv6Config(input, "", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
 	if err != nil {
 		t.Fatalf("injectIPv6Config failed: %v", err)
 	}
@@ -424,15 +429,17 @@ func TestInjectIPv6Config_Empty(t *testing.T) {
 }
 
 func TestInjectIPv6Config_MergeExistingInterface(t *testing.T) {
+	// Existing config uses deviceSelector with MAC — injectIPv6Config matches by hardwareAddr
 	input := []byte(`machine:
   network:
     interfaces:
-      - interface: enp193s0f0np0
+      - deviceSelector:
+          hardwareAddr: aa:bb:cc:dd:ee:ff
         dhcp: true
         addresses:
           - 10.0.0.1/24
 `)
-	result, err := injectIPv6Config(input, "2a01:4f8::", "enp193s0f0np0")
+	result, err := injectIPv6Config(input, "2a01:4f8::", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
 	if err != nil {
 		t.Fatalf("injectIPv6Config failed: %v", err)
 	}

@@ -93,6 +93,13 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	PrimaryMAC string `json:"primaryMAC,omitempty"`
 
+	// ResolvedInstallDisk is the stable /dev/disk/by-id/ path resolved during rescue.
+	// NVMe device names (/dev/nvme0n1) swap between rescue and Talos boot due to
+	// different PCI probe order. This stable path ensures both the installer and
+	// Talos machineconfig reference the same physical disk.
+	// +optional
+	ResolvedInstallDisk string `json:"resolvedInstallDisk,omitempty"`
+
 	// FailureReason is a brief string indicating why this machine failed.
 	// +optional
 	FailureReason *string `json:"failureReason,omitempty"`
