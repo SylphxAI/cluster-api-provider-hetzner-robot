@@ -581,6 +581,18 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	hrm.Status.PrimaryMAC = primaryMAC
 	logger.Info("Detected primary NIC MAC", "mac", primaryMAC, "ip", serverIP)
 
+	// Auto-detect default gateway IP from rescue routing table.
+	// Stored in status so stateApplyConfig can inject static routes into the
+	// Talos machineconfig. Required because we use /32 addresses (not DHCP)
+	// to avoid Hetzner's L2 isolation issue with /25 on-link routes.
+	gatewayIP, err := sshClient.Run("ip route | grep default | awk '{print $3}' | head -1")
+	if err != nil || strings.TrimSpace(gatewayIP) == "" {
+		return ctrl.Result{}, fmt.Errorf("detect default gateway on %s: %w (output: %s)", serverIP, err, gatewayIP)
+	}
+	gatewayIP = strings.TrimSpace(gatewayIP)
+	hrm.Status.GatewayIP = gatewayIP
+	logger.Info("Detected default gateway", "gateway", gatewayIP, "ip", serverIP)
+
 	configuredDisk := hrm.Spec.InstallDisk
 	if configuredDisk == "" {
 		configuredDisk = "/dev/nvme0n1"
@@ -1016,10 +1028,17 @@ func injectHostname(configData []byte, dc string, serverID int, hostRole string)
 	return yaml.Marshal(config)
 }
 
-// injectVLANConfig adds a VLAN interface to the Talos machineconfig.
+// injectVLANConfig adds a VLAN interface to the Talos machineconfig and configures
+// static IPv4 routing on the parent NIC.
+//
 // Uses deviceSelector by MAC address for parent NIC identification.
-// Ensures dhcp: true on parent (preserves public IP) and adds VLAN with internal IP.
-func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string) ([]byte, error) {
+// Configures static /32 address + explicit default route on the parent NIC instead
+// of DHCP. Hetzner DHCP assigns /25 or /26 prefixes which create on-link routes for
+// the entire subnet. When two servers share the same /25 (e.g., 138.199.242.217 and
+// 138.199.242.218), the kernel tries direct ARP instead of routing through the gateway.
+// Hetzner blocks direct L2 between servers, so SSH and all inter-node traffic fails.
+// Static /32 + explicit gateway forces all traffic through the router.
+func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string, serverIP string, gatewayIP string) ([]byte, error) {
 	if vlanCfg == nil || internalIP == "" {
 		return configData, nil
 	}
@@ -1054,13 +1073,30 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		},
 	}
 
-	// Build the interface entry with deviceSelector + dhcp: true + VLAN
+	// Build static routes for the parent NIC.
+	// With a /32 address, the kernel has no on-link route for the gateway itself.
+	// The on-link route (gatewayIP/32 with no gateway field) tells the kernel the
+	// gateway is directly reachable on this interface. Without it, the default route
+	// fails with "network unreachable" because there's no path to the next hop.
+	parentRoutes := []interface{}{
+		map[string]interface{}{
+			"network": "0.0.0.0/0",
+			"gateway": gatewayIP,
+		},
+		map[string]interface{}{
+			"network": gatewayIP + "/32",
+		},
+	}
+
+	// Build the interface entry with deviceSelector + static IP + routes + VLAN.
+	// No DHCP — static /32 avoids Hetzner's L2 isolation issue with /25 on-link routes.
 	ifaceEntry := map[string]interface{}{
 		"deviceSelector": map[string]interface{}{
 			"hardwareAddr": primaryMAC, "physical": true,
 		},
-		"dhcp":  true, // CRITICAL: preserve public IP via DHCP
-		"vlans": []interface{}{vlanEntry},
+		"addresses": []interface{}{serverIP + "/32"},
+		"routes":    parentRoutes,
+		"vlans":     []interface{}{vlanEntry},
 	}
 
 	// Find or create the interfaces list
@@ -1078,8 +1114,10 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		}
 		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
 		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-			// Ensure dhcp: true is set
-			ifMap["dhcp"] = true
+			// Set static IP config (replace any existing dhcp/addresses)
+			delete(ifMap, "dhcp")
+			ifMap["addresses"] = []interface{}{serverIP + "/32"}
+			ifMap["routes"] = parentRoutes
 			// Add VLAN to existing vlans list (or create new)
 			existingVlans, _ := ifMap["vlans"].([]interface{})
 			ifMap["vlans"] = append(existingVlans, vlanEntry)
@@ -1280,20 +1318,29 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("primary NIC MAC not detected — machine must go through rescue install first")
 	}
 
-	// Inject VLAN config if configured on the cluster
+	// Inject VLAN config if configured on the cluster.
+	// Uses static /32 IP + explicit default route instead of DHCP to avoid Hetzner's
+	// L2 isolation issue. DHCP assigns /25 which creates on-link routes — servers in
+	// the same /25 try direct ARP instead of routing through the gateway. Hetzner
+	// blocks this, breaking inter-node connectivity.
 	if hrc.Spec.VLANConfig != nil {
 		internalIP := hrh.Spec.InternalIP
 		if internalIP == "" {
 			return ctrl.Result{}, fmt.Errorf("VLANConfig is set on cluster but host %s has no internalIP", hrh.Name)
 		}
-		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP, primaryMAC)
+		gatewayIP := hrm.Status.GatewayIP
+		if gatewayIP == "" {
+			return ctrl.Result{}, fmt.Errorf("gateway IP not detected — machine must go through rescue install first")
+		}
+		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP, primaryMAC, serverIP, gatewayIP)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("inject VLAN config: %w", err)
 		}
 		logger.Info("Injected VLAN config into machineconfig",
 			"vlanID", hrc.Spec.VLANConfig.ID,
-			"interface", hrc.Spec.VLANConfig.Interface,
-			"internalIP", internalIP)
+			"internalIP", internalIP,
+			"serverIP", serverIP+"/32",
+			"gatewayIP", gatewayIP)
 	}
 
 	// Inject deterministic hostname: <role>-<dc>-<serverID>.

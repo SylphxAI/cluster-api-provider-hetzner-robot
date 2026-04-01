@@ -93,6 +93,14 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	PrimaryMAC string `json:"primaryMAC,omitempty"`
 
+	// GatewayIP is the default gateway IP, auto-detected from rescue mode.
+	// Used to configure static routing with /32 addresses on the primary NIC.
+	// Hetzner DHCP assigns /25 or /26 prefixes which create on-link routes for the
+	// entire subnet — but Hetzner blocks direct L2 between servers. Static /32 + explicit
+	// gateway avoids this by forcing all traffic through the gateway.
+	// +optional
+	GatewayIP string `json:"gatewayIP,omitempty"`
+
 	// ResolvedInstallDisk is the stable /dev/disk/by-id/ path resolved during rescue.
 	// NVMe device names (/dev/nvme0n1) swap between rescue and Talos boot due to
 	// different PCI probe order. This stable path ensures both the installer and

@@ -64,7 +64,7 @@ cluster:
 		PrefixLength: 24,
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.1", "aa:bb:cc:dd:ee:ff")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.1", "aa:bb:cc:dd:ee:ff", "138.199.242.217", "138.199.242.129")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -88,8 +88,31 @@ cluster:
 	if selector["hardwareAddr"] != "aa:bb:cc:dd:ee:ff" {
 		t.Errorf("expected deviceSelector.hardwareAddr aa:bb:cc:dd:ee:ff, got %v", selector["hardwareAddr"])
 	}
-	if iface["dhcp"] != true {
-		t.Errorf("expected dhcp true, got %v", iface["dhcp"])
+
+	// Static /32 address instead of DHCP
+	if iface["dhcp"] != nil {
+		t.Errorf("expected no dhcp field (static config), got %v", iface["dhcp"])
+	}
+	parentAddrs := iface["addresses"].([]interface{})
+	if len(parentAddrs) != 1 || parentAddrs[0] != "138.199.242.217/32" {
+		t.Errorf("expected parent address 138.199.242.217/32, got %v", parentAddrs)
+	}
+
+	// Static routes: default route + on-link route to gateway
+	routes := iface["routes"].([]interface{})
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(routes))
+	}
+	defaultRoute := routes[0].(map[string]interface{})
+	if defaultRoute["network"] != "0.0.0.0/0" || defaultRoute["gateway"] != "138.199.242.129" {
+		t.Errorf("expected default route via 138.199.242.129, got %v", defaultRoute)
+	}
+	onlinkRoute := routes[1].(map[string]interface{})
+	if onlinkRoute["network"] != "138.199.242.129/32" {
+		t.Errorf("expected on-link route 138.199.242.129/32, got %v", onlinkRoute)
+	}
+	if _, hasGW := onlinkRoute["gateway"]; hasGW {
+		t.Errorf("on-link route should not have gateway field, got %v", onlinkRoute["gateway"])
 	}
 
 	vlans := iface["vlans"].([]interface{})
@@ -112,7 +135,7 @@ func TestInjectVLANConfig_NilConfig(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectVLANConfig(input, nil, "10.10.0.1", "aa:bb:cc:dd:ee:ff")
+	result, err := injectVLANConfig(input, nil, "10.10.0.1", "aa:bb:cc:dd:ee:ff", "138.199.242.217", "138.199.242.129")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -126,7 +149,7 @@ func TestInjectVLANConfig_EmptyInternalIP(t *testing.T) {
   type: controlplane
 `)
 	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0"}
-	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff")
+	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff", "138.199.242.217", "138.199.242.129")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -150,7 +173,7 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 		PrefixLength: 24,
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.2", "aa:bb:cc:dd:ee:ff")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.2", "aa:bb:cc:dd:ee:ff", "138.199.242.218", "138.199.242.129")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}
@@ -174,9 +197,19 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 	if iface["mtu"] != 9000 {
 		t.Errorf("expected mtu 9000 preserved, got %v", iface["mtu"])
 	}
-	// dhcp: true injected
-	if iface["dhcp"] != true {
-		t.Errorf("expected dhcp true injected, got %v", iface["dhcp"])
+	// No DHCP — static /32 config
+	if iface["dhcp"] != nil {
+		t.Errorf("expected no dhcp field (static config), got %v", iface["dhcp"])
+	}
+	// Static /32 address
+	parentAddrs := iface["addresses"].([]interface{})
+	if len(parentAddrs) != 1 || parentAddrs[0] != "138.199.242.218/32" {
+		t.Errorf("expected parent address 138.199.242.218/32, got %v", parentAddrs)
+	}
+	// Static routes
+	routes := iface["routes"].([]interface{})
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
 	// VLAN added
 	vlans := iface["vlans"].([]interface{})
@@ -341,7 +374,7 @@ func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
 		// PrefixLength not set — should default to 24
 	}
 
-	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.3", "aa:bb:cc:dd:ee:ff")
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.3", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
 	}

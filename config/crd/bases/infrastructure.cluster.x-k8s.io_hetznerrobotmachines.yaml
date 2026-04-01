@@ -227,6 +227,14 @@ spec:
                 description: FailureReason is a brief string indicating why this machine
                   failed.
                 type: string
+              gatewayIP:
+                description: |-
+                  GatewayIP is the default gateway IP, auto-detected from rescue mode.
+                  Used to configure static routing with /32 addresses on the primary NIC.
+                  Hetzner DHCP assigns /25 or /26 prefixes which create on-link routes for the
+                  entire subnet — but Hetzner blocks direct L2 between servers. Static /32 + explicit
+                  gateway avoids this by forcing all traffic through the gateway.
+                type: string
               hostRef:
                 description: |-
                   HostRef tracks which HetznerRobotHost was claimed by this machine.

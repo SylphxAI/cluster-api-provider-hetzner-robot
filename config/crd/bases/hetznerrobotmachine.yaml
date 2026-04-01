@@ -130,6 +130,22 @@ spec:
               hostRef:
                 description: HostRef tracks which HetznerRobotHost was claimed by this machine.
                 type: string
+              primaryMAC:
+                description: PrimaryMAC is the MAC address of the primary NIC, auto-detected during rescue.
+                type: string
+              gatewayIP:
+                description: >-
+                  GatewayIP is the default gateway IP, auto-detected from rescue mode.
+                  Used to configure static routing with /32 addresses on the primary NIC.
+                type: string
+              resolvedInstallDisk:
+                description: >-
+                  ResolvedInstallDisk is the stable /dev/disk/by-id/ path resolved during rescue.
+                type: string
+              lastRetryTimestamp:
+                description: LastRetryTimestamp is set each time RetryCount is incremented.
+                format: date-time
+                type: string
               retryCount:
                 description: RetryCount tracks consecutive reconciliation errors.
                 type: integer
