@@ -614,13 +614,15 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		factoryURL = talosFactoryDefaultBaseURL
 	}
 
-	// Use stable by-id path for the Talos installer so the correct physical disk
-	// is targeted regardless of NVMe enumeration order at boot.
+	// Use the BARE device path for the Talos installer in rescue chroot.
+	// The by-id symlinks (/dev/disk/by-id/) may not exist inside the unshare chroot
+	// because udev doesn't run there. The stable by-id path is only used for the
+	// machineconfig (injected in stateApplyConfig), where Talos has full udev.
 	if err := sshClient.InstallTalos(
 		factoryURL,
 		hrm.Spec.TalosSchematic,
 		hrm.Spec.TalosVersion,
-		stableDisk,
+		installDisk, // bare path like /dev/nvme0n1 — works in rescue chroot
 	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
 	}

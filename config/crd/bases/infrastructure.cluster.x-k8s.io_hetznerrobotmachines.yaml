@@ -248,6 +248,13 @@ spec:
               provisioningState:
                 description: ProvisioningState is the current state of provisioning.
                 type: string
+              resolvedInstallDisk:
+                description: |-
+                  ResolvedInstallDisk is the stable /dev/disk/by-id/ path for the install disk,
+                  resolved from the bare NVMe device name during rescue. Used by stateApplyConfig
+                  to inject into the Talos machineconfig, ensuring the correct physical disk is
+                  referenced regardless of NVMe enumeration order across reboots.
+                type: string
               ready:
                 description: Ready indicates the machine is provisioned and healthy.
                 type: boolean
