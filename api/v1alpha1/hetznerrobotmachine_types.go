@@ -57,6 +57,15 @@ type HetznerRobotMachineSpec struct {
 	// +optional
 	// +kubebuilder:default="/dev/nvme0n1"
 	InstallDisk string `json:"installDisk,omitempty"`
+
+	// EphemeralSize, if set, limits the Talos EPHEMERAL partition (/var) to this size
+	// and creates a raw data partition ("osd-data") with the remaining disk space.
+	// Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
+	// The data partition appears at /dev/disk/by-partlabel/r-osd-data and is
+	// intended for Ceph OSD use. Only applicable to storage nodes.
+	// Example: "100GiB"
+	// +optional
+	EphemeralSize string `json:"ephemeralSize,omitempty"`
 }
 
 // HetznerRobotMachineStatus defines the observed state of HetznerRobotMachine.

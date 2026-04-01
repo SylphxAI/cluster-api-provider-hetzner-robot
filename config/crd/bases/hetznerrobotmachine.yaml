@@ -91,6 +91,14 @@ spec:
               talosVersion:
                 description: "TalosVersion is the Talos version to install (e.g. v1.12.4)."
                 type: string
+              ephemeralSize:
+                description: >-
+                  EphemeralSize, if set, limits the Talos EPHEMERAL partition (/var) to this size
+                  and creates a raw data partition ("osd-data") with the remaining disk space.
+                  Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
+                  The data partition appears at /dev/disk/by-partlabel/r-osd-data.
+                  Only applicable to storage nodes. Example: "100GiB"
+                type: string
               installDisk:
                 description: "InstallDisk is the disk to install Talos on. Defaults to /dev/nvme0n1"
                 default: "/dev/nvme0n1"

@@ -1110,6 +1110,45 @@ func injectProviderID(configData []byte, providerID string) ([]byte, error) {
 	return yaml.Marshal(config)
 }
 
+// injectStorageVolumes appends VolumeConfig + RawVolumeConfig YAML documents to
+// the machineconfig when EphemeralSize is set. Uses Talos v1.12+ native volume
+// management instead of post-install sgdisk manipulation.
+//
+// VolumeConfig limits the EPHEMERAL partition to the specified maxSize.
+// RawVolumeConfig creates an "osd-data" raw partition with remaining space,
+// which appears at /dev/disk/by-partlabel/r-osd-data for Ceph OSD use.
+//
+// The volume name MUST NOT contain "ceph" — Ceph inventory rejects partitions
+// with "ceph" in PARTLABEL.
+func injectStorageVolumes(configData []byte, ephemeralSize string) ([]byte, error) {
+	if ephemeralSize == "" {
+		return configData, nil
+	}
+
+	volumeConfig := fmt.Sprintf(`---
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+provisioning:
+  maxSize: %s
+`, ephemeralSize)
+
+	rawVolumeConfig := `---
+apiVersion: v1alpha1
+kind: RawVolumeConfig
+name: osd-data
+provisioning:
+  diskSelector:
+    match: system_disk
+  minSize: 50GB
+`
+
+	// Append the volume documents to the machineconfig as a multi-document YAML stream.
+	// Talos config apply accepts multi-doc YAML — each document is processed independently.
+	result := append(configData, []byte("\n"+volumeConfig+rawVolumeConfig)...)
+	return result, nil
+}
+
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
 func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 	ctx context.Context,
@@ -1243,6 +1282,18 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("inject providerID into config: %w", err)
 	}
 	logger.Info("Injected providerID into machineconfig", "providerID", providerID)
+
+	// Inject storage volume config if ephemeralSize is set.
+	// Appends VolumeConfig (limits EPHEMERAL) + RawVolumeConfig (creates raw OSD partition)
+	// as additional YAML documents. Talos v1.12+ processes these natively during boot.
+	if hrm.Spec.EphemeralSize != "" {
+		bootstrapData, err = injectStorageVolumes(bootstrapData, hrm.Spec.EphemeralSize)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject storage volumes config: %w", err)
+		}
+		logger.Info("Injected storage volume config into machineconfig",
+			"ephemeralSize", hrm.Spec.EphemeralSize)
+	}
 
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
 
