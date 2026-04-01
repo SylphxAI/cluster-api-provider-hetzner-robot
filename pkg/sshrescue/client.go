@@ -425,6 +425,41 @@ func IsReachable(ip string) bool {
 	return isReachableAddr(net.JoinHostPort(ip, strconv.Itoa(rescueSSHPort)), 15*time.Second)
 }
 
+// IsRescueMode SSHes into the server and determines whether it is running in
+// Hetzner rescue mode or a normal OS (Debian, Talos, etc.).
+//
+// Detection strategy (any match = rescue):
+//  1. Root filesystem is tmpfs — rescue runs entirely in RAM.
+//  2. /etc/motd contains "Hetzner Rescue" — Hetzner sets this in every rescue image.
+//  3. Hostname is "rescue" — Hetzner rescue default hostname.
+//
+// The tmpfs check is the most reliable: no normal OS uses tmpfs as root.
+// The other checks are fallbacks for edge cases (e.g., custom rescue images).
+//
+// Returns (true, nil) if rescue is confirmed, (false, nil) if a normal OS is
+// detected, or (false, err) if the SSH connection or command fails.
+func IsRescueMode(ip string, privateKey []byte) (bool, error) {
+	client := New(ip, privateKey)
+	if err := client.Connect(); err != nil {
+		return false, fmt.Errorf("SSH connect for rescue check on %s: %w", ip, err)
+	}
+	defer client.Close()
+
+	// Single command checks all three indicators and prints a deterministic result.
+	// Any one match is sufficient to confirm rescue mode.
+	out, err := client.Run(
+		`if mount | grep 'on / ' | grep -q tmpfs; then echo RESCUE; ` +
+			`elif grep -qi 'Hetzner Rescue' /etc/motd 2>/dev/null; then echo RESCUE; ` +
+			`elif [ "$(hostname)" = "rescue" ]; then echo RESCUE; ` +
+			`else echo NORMAL; fi`,
+	)
+	if err != nil {
+		return false, fmt.Errorf("rescue mode detection on %s: %w (output: %s)", ip, err, out)
+	}
+
+	return strings.TrimSpace(out) == "RESCUE", nil
+}
+
 // isReachableAddr checks if the given address is reachable via TCP within the timeout.
 func isReachableAddr(addr string, timeout time.Duration) bool {
 	conn, err := net.DialTimeout("tcp", addr, timeout)

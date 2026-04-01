@@ -265,6 +265,47 @@ func TestShellQuote_WithSpecialChars(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// IsRescueMode
+// ---------------------------------------------------------------------------
+
+func TestIsRescueMode_InvalidKeyReturnsError(t *testing.T) {
+	// IsRescueMode with an invalid private key should fail during SSH connect,
+	// not silently report non-rescue.
+	isRescue, err := IsRescueMode("127.0.0.1", []byte("not-a-real-private-key"))
+	if err == nil {
+		t.Fatal("expected error from IsRescueMode with invalid key, got nil")
+	}
+	if isRescue {
+		t.Error("expected isRescue=false on error")
+	}
+	if !strings.Contains(err.Error(), "SSH connect for rescue check") {
+		t.Errorf("expected SSH connect error, got: %v", err)
+	}
+}
+
+func TestIsRescueMode_UnreachableHostReturnsError(t *testing.T) {
+	// Use a closed port — IsRescueMode should return an error, not false.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	// Extract just the IP (without port) — IsRescueMode uses port 22 internally.
+	// Since port 22 on 127.0.0.1 is unlikely to be our test server, and there's no
+	// valid SSH key, we just verify it returns an error rather than a false positive.
+	isRescue, rescueErr := IsRescueMode("198.51.100.1", []byte("not-a-real-key"))
+	_ = addr // used to get a random port, but IsRescueMode connects on port 22
+	if rescueErr == nil {
+		t.Fatal("expected error from IsRescueMode on unreachable host, got nil")
+	}
+	if isRescue {
+		t.Error("expected isRescue=false on error")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 

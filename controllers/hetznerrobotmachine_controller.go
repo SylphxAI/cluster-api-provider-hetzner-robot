@@ -273,12 +273,24 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}
-		// Optimization: if rescue SSH is already open (server already in rescue mode),
+		// Optimization: if rescue SSH is already open AND verified as rescue mode,
 		// skip rescue activation and go straight to install.
+		// SSH reachable alone is NOT sufficient — a normal OS (Debian) also has SSH on port 22.
 		if sshrescue.IsReachable(serverIP) {
-			logger.Info("Node already in rescue mode (SSH reachable), skipping rescue activation", "ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateInRescue
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+			privateKey, keyErr := r.getSSHPrivateKey(ctx, hrc)
+			if keyErr == nil {
+				isRescue, rescueErr := sshrescue.IsRescueMode(serverIP, privateKey)
+				if rescueErr == nil && isRescue {
+					logger.Info("Node already in rescue mode (verified), skipping rescue activation", "ip", serverIP)
+					hrm.Status.ProvisioningState = infrav1.StateInRescue
+					return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+				}
+				if rescueErr == nil && !isRescue {
+					logger.Info("SSH reachable but not rescue mode (normal OS detected), proceeding with rescue activation",
+						"ip", serverIP)
+				}
+			}
+			// If key retrieval or rescue check failed, fall through to normal rescue activation.
 		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
@@ -520,14 +532,38 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
-	logger.Info("Installing Talos via rescue SSH", "ip", serverIP)
-
-	// Get private key
+	// CRITICAL: SSH reachable does NOT mean rescue mode. A server running a normal OS
+	// (Debian with cephadm, old Talos) also has SSH on port 22. Installing Talos on a
+	// running production server would destroy it. Verify rescue before proceeding.
 	privateKey, err := r.getSSHPrivateKey(ctx, hrc)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get SSH private key: %w", err)
+		return ctrl.Result{}, fmt.Errorf("get SSH private key for rescue check: %w", err)
+	}
+	isRescue, rescueErr := sshrescue.IsRescueMode(serverIP, privateKey)
+	if rescueErr != nil {
+		// SSH auth failure or command failure — cannot determine state. Retry.
+		logger.Info("Could not verify rescue mode, will retry", "ip", serverIP, "error", rescueErr)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+	if !isRescue {
+		// Server is running a normal OS, not rescue. Re-activate rescue + hw reset.
+		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: server keeps booting normal OS instead of rescue after max retries — EFI boot order needs manual intervention via Hetzner Robot panel",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		logger.Info("Server running normal OS instead of rescue, re-activating rescue and triggering hw reset",
+			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
+	logger.Info("Rescue mode verified, installing Talos via rescue SSH", "ip", serverIP)
+
+	// privateKey already retrieved above for the rescue mode check — reuse it.
 	sshClient := sshrescue.New(serverIP, privateKey)
 	if err := sshClient.Connect(); err != nil {
 		return ctrl.Result{}, fmt.Errorf("SSH connect to rescue %s: %w", serverIP, err)
