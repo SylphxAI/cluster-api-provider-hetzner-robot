@@ -629,39 +629,12 @@ func TestResolveInstallDisk_ErrorWrapsContext(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// WipeOSDisk
-// ---------------------------------------------------------------------------
-
-func TestWipeOSDisk_RequiresConnection(t *testing.T) {
-	c := New("127.0.0.1", []byte("key"))
-	_, err := c.WipeOSDisk("/dev/nvme0n1")
-	if err == nil {
-		t.Fatal("expected error when calling WipeOSDisk without connection")
-	}
-	if !strings.Contains(err.Error(), "not connected") {
-		t.Errorf("expected 'not connected' in error, got: %v", err)
-	}
-}
-
-func TestWipeOSDisk_ErrorContainsDiskName(t *testing.T) {
-	c := New("127.0.0.1", []byte("key"))
-	_, err := c.WipeOSDisk("/dev/nvme0n1")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	// WipeOSDisk wraps the error with "disk safety check failed for <disk>"
-	if !strings.Contains(err.Error(), "/dev/nvme0n1") {
-		t.Errorf("expected disk name in error, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // WipeAllDisks
 // ---------------------------------------------------------------------------
 
 func TestWipeAllDisks_RequiresConnection(t *testing.T) {
 	c := New("127.0.0.1", []byte("key"))
-	_, err := c.WipeAllDisks("/dev/nvme0n1")
+	_, err := c.WipeAllDisks([]string{"/dev/nvme0n1", "/dev/nvme1n1"})
 	if err == nil {
 		t.Fatal("expected error when calling WipeAllDisks without connection")
 	}
@@ -670,15 +643,275 @@ func TestWipeAllDisks_RequiresConnection(t *testing.T) {
 	}
 }
 
+func TestWipeAllDisks_EmptyDisksReturnsError(t *testing.T) {
+	c := New("127.0.0.1", []byte("key"))
+	_, err := c.WipeAllDisks([]string{})
+	if err == nil {
+		t.Fatal("expected error when calling WipeAllDisks with empty disk list")
+	}
+	if !strings.Contains(err.Error(), "no disks specified") {
+		t.Errorf("expected 'no disks specified' in error, got: %v", err)
+	}
+}
+
+func TestWipeAllDisks_NilDisksReturnsError(t *testing.T) {
+	c := New("127.0.0.1", []byte("key"))
+	_, err := c.WipeAllDisks(nil)
+	if err == nil {
+		t.Fatal("expected error when calling WipeAllDisks with nil disk list")
+	}
+	if !strings.Contains(err.Error(), "no disks specified") {
+		t.Errorf("expected 'no disks specified' in error, got: %v", err)
+	}
+}
+
 func TestWipeAllDisks_ErrorWrapsContext(t *testing.T) {
 	c := New("127.0.0.1", []byte("key"))
-	_, err := c.WipeAllDisks("/dev/nvme0n1")
+	_, err := c.WipeAllDisks([]string{"/dev/nvme0n1"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// The error should mention "list NVMe disks" since that's the first Run call.
-	if !strings.Contains(err.Error(), "list NVMe disks") {
-		t.Errorf("expected 'list NVMe disks' in error, got: %v", err)
+	// The error should mention "wipe all disks" since that wraps the Run failure.
+	if !strings.Contains(err.Error(), "wipe all disks") {
+		t.Errorf("expected 'wipe all disks' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DetectHardware
+// ---------------------------------------------------------------------------
+
+func TestDetectHardware_RequiresConnection(t *testing.T) {
+	c := New("127.0.0.1", []byte("key"))
+	_, err := c.DetectHardware()
+	if err == nil {
+		t.Fatal("expected error when calling DetectHardware without connection")
+	}
+	if !strings.Contains(err.Error(), "not connected") {
+		t.Errorf("expected 'not connected' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ParseHardwareOutput
+// ---------------------------------------------------------------------------
+
+func TestParseHardwareOutput_FullOutput(t *testing.T) {
+	output := `MAC=aa:bb:cc:dd:ee:ff
+GATEWAY=91.98.183.1
+DISK=/dev/nvme0n1
+DISK=/dev/nvme1n1
+CEPH=/dev/nvme1n1
+BYID=/dev/nvme0n1=/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S123
+BYID=/dev/nvme1n1=/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S456
+`
+	hw, err := ParseHardwareOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hw.PrimaryMAC != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("expected MAC=aa:bb:cc:dd:ee:ff, got %q", hw.PrimaryMAC)
+	}
+	if hw.GatewayIP != "91.98.183.1" {
+		t.Errorf("expected GATEWAY=91.98.183.1, got %q", hw.GatewayIP)
+	}
+	if len(hw.NVMeDisks) != 2 {
+		t.Fatalf("expected 2 NVMe disks, got %d", len(hw.NVMeDisks))
+	}
+	if hw.NVMeDisks[0] != "/dev/nvme0n1" || hw.NVMeDisks[1] != "/dev/nvme1n1" {
+		t.Errorf("unexpected disk list: %v", hw.NVMeDisks)
+	}
+	if !hw.CephDisks["/dev/nvme1n1"] {
+		t.Error("expected /dev/nvme1n1 to be marked as Ceph")
+	}
+	if hw.CephDisks["/dev/nvme0n1"] {
+		t.Error("/dev/nvme0n1 should NOT be marked as Ceph")
+	}
+	if hw.ByIDPaths["/dev/nvme0n1"] != "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S123" {
+		t.Errorf("unexpected by-id path for nvme0n1: %q", hw.ByIDPaths["/dev/nvme0n1"])
+	}
+	if hw.ByIDPaths["/dev/nvme1n1"] != "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S456" {
+		t.Errorf("unexpected by-id path for nvme1n1: %q", hw.ByIDPaths["/dev/nvme1n1"])
+	}
+}
+
+func TestParseHardwareOutput_MissingMAC(t *testing.T) {
+	output := "GATEWAY=10.0.0.1\nDISK=/dev/nvme0n1\n"
+	_, err := ParseHardwareOutput(output)
+	if err == nil {
+		t.Fatal("expected error for missing MAC")
+	}
+	if !strings.Contains(err.Error(), "MAC address not found") {
+		t.Errorf("expected 'MAC address not found' in error, got: %v", err)
+	}
+}
+
+func TestParseHardwareOutput_MissingGateway(t *testing.T) {
+	output := "MAC=aa:bb:cc:dd:ee:ff\nDISK=/dev/nvme0n1\n"
+	_, err := ParseHardwareOutput(output)
+	if err == nil {
+		t.Fatal("expected error for missing GATEWAY")
+	}
+	if !strings.Contains(err.Error(), "gateway IP not found") {
+		t.Errorf("expected 'gateway IP not found' in error, got: %v", err)
+	}
+}
+
+func TestParseHardwareOutput_EmptyOutput(t *testing.T) {
+	_, err := ParseHardwareOutput("")
+	if err == nil {
+		t.Fatal("expected error for empty output")
+	}
+}
+
+func TestParseHardwareOutput_NoDisks(t *testing.T) {
+	output := "MAC=aa:bb:cc:dd:ee:ff\nGATEWAY=10.0.0.1\n"
+	hw, err := ParseHardwareOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hw.NVMeDisks) != 0 {
+		t.Errorf("expected no disks, got %d", len(hw.NVMeDisks))
+	}
+}
+
+func TestParseHardwareOutput_NoCephDisks(t *testing.T) {
+	output := "MAC=aa:bb:cc:dd:ee:ff\nGATEWAY=10.0.0.1\nDISK=/dev/nvme0n1\nDISK=/dev/nvme1n1\n"
+	hw, err := ParseHardwareOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hw.CephDisks) != 0 {
+		t.Errorf("expected no Ceph disks, got %d", len(hw.CephDisks))
+	}
+}
+
+func TestParseHardwareOutput_ExtraWhitespace(t *testing.T) {
+	output := "  MAC=aa:bb:cc:dd:ee:ff  \n  GATEWAY=10.0.0.1  \n\n\n"
+	hw, err := ParseHardwareOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hw.PrimaryMAC != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("expected trimmed MAC, got %q", hw.PrimaryMAC)
+	}
+}
+
+func TestParseHardwareOutput_ByIDWithEqualsInPath(t *testing.T) {
+	// Ensure BYID parsing handles = correctly (SplitN with limit 2)
+	output := "MAC=aa:bb:cc:dd:ee:ff\nGATEWAY=10.0.0.1\nBYID=/dev/nvme0n1=/dev/disk/by-id/nvme-disk=with=equals\n"
+	hw, err := ParseHardwareOutput(output)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hw.ByIDPaths["/dev/nvme0n1"] != "/dev/disk/by-id/nvme-disk=with=equals" {
+		t.Errorf("unexpected by-id path: %q", hw.ByIDPaths["/dev/nvme0n1"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolveInstallDiskFromInfo
+// ---------------------------------------------------------------------------
+
+func TestResolveInstallDiskFromInfo_PreferConfiguredDisk(t *testing.T) {
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{"/dev/nvme1n1": true},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme0n1" {
+		t.Errorf("expected /dev/nvme0n1, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_SwappedDisk(t *testing.T) {
+	// Configured disk is nvme0n1 but it has Ceph — should pick nvme1n1
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{"/dev/nvme0n1": true},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme1n1" {
+		t.Errorf("expected /dev/nvme1n1, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_AllCeph(t *testing.T) {
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{"/dev/nvme0n1": true, "/dev/nvme1n1": true},
+	}
+	_, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err == nil {
+		t.Fatal("expected error when all disks have Ceph")
+	}
+	if !strings.Contains(err.Error(), "all NVMe disks have Ceph BlueStore data") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_NoDisks(t *testing.T) {
+	hw := &HardwareInfo{
+		NVMeDisks: nil,
+		CephDisks: map[string]bool{},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No NVMe disks → fall back to configured
+	if disk != "/dev/nvme0n1" {
+		t.Errorf("expected fallback to configured disk, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_NoCeph_PreferConfigured(t *testing.T) {
+	// Fresh server — no Ceph on any disk, configured is in the safe list
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme1n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme1n1" {
+		t.Errorf("expected configured disk /dev/nvme1n1, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_NoCeph_ConfiguredNotPresent(t *testing.T) {
+	// Configured disk doesn't exist — pick first safe
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme9n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme0n1" {
+		t.Errorf("expected first safe disk /dev/nvme0n1, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_SingleDiskNoCeph(t *testing.T) {
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1"},
+		CephDisks: map[string]bool{},
+	}
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme0n1" {
+		t.Errorf("expected /dev/nvme0n1, got %q", disk)
 	}
 }
 

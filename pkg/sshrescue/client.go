@@ -104,6 +104,123 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// HardwareInfo contains all hardware details collected from rescue in a single SSH call.
+type HardwareInfo struct {
+	PrimaryMAC string            // MAC of the default-route NIC
+	GatewayIP  string            // Default gateway IP
+	NVMeDisks  []string          // All NVMe whole-disk devices (e.g., /dev/nvme0n1)
+	CephDisks  map[string]bool   // NVMe disks with ceph_bluestore signatures
+	ByIDPaths  map[string]string // Maps bare device → /dev/disk/by-id/... stable path
+}
+
+// DetectHardware runs a single SSH command to collect all hardware details
+// (MAC, gateway, NVMe disks, Ceph signatures, stable by-id paths) from the
+// rescue environment. This replaces multiple sequential SSH calls with one
+// round-trip, reducing rescue provisioning latency.
+func (c *Client) DetectHardware() (*HardwareInfo, error) {
+	cmd := `echo "MAC=$(ip link show $(ip route show default | awk '{print $5}') | grep ether | awk '{print $2}')"
+echo "GATEWAY=$(ip route | grep default | awk '{print $3}' | head -1)"
+for d in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk" && $1~/^nvme/ {print "/dev/"$1}'); do
+  echo "DISK=$d"
+  if blkid "$d"* 2>/dev/null | grep -q ceph_bluestore; then
+    echo "CEPH=$d"
+  fi
+done
+for link in /dev/disk/by-id/nvme-*; do
+  [ -L "$link" ] || continue
+  case "$link" in *-part*) continue;; esac
+  target=$(readlink -f "$link")
+  echo "BYID=$target=$link"
+done`
+
+	out, err := c.Run(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("detect hardware: %w\nOutput: %s", err, out)
+	}
+
+	return ParseHardwareOutput(out)
+}
+
+// ParseHardwareOutput parses the labeled output from DetectHardware into a
+// HardwareInfo struct. Returns an error if MAC or GATEWAY is missing.
+func ParseHardwareOutput(output string) (*HardwareInfo, error) {
+	hw := &HardwareInfo{
+		CephDisks: make(map[string]bool),
+		ByIDPaths: make(map[string]string),
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "MAC="):
+			hw.PrimaryMAC = strings.TrimPrefix(line, "MAC=")
+
+		case strings.HasPrefix(line, "GATEWAY="):
+			hw.GatewayIP = strings.TrimPrefix(line, "GATEWAY=")
+
+		case strings.HasPrefix(line, "DISK="):
+			hw.NVMeDisks = append(hw.NVMeDisks, strings.TrimPrefix(line, "DISK="))
+
+		case strings.HasPrefix(line, "CEPH="):
+			hw.CephDisks[strings.TrimPrefix(line, "CEPH=")] = true
+
+		case strings.HasPrefix(line, "BYID="):
+			// Format: BYID=/dev/nvme0n1=/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S123
+			rest := strings.TrimPrefix(line, "BYID=")
+			parts := strings.SplitN(rest, "=", 2)
+			if len(parts) == 2 {
+				hw.ByIDPaths[parts[0]] = parts[1]
+			}
+		}
+	}
+
+	if hw.PrimaryMAC == "" {
+		return nil, fmt.Errorf("parse hardware output: MAC address not found")
+	}
+	if hw.GatewayIP == "" {
+		return nil, fmt.Errorf("parse hardware output: gateway IP not found")
+	}
+
+	return hw, nil
+}
+
+// ResolveInstallDiskFromInfo determines the correct install disk using
+// pre-collected hardware info. This is a pure function — no SSH required.
+//
+// Logic:
+//  1. Find NVMe disks that do NOT have Ceph BlueStore data
+//  2. If no safe disks exist, return an error
+//  3. If the configured disk is among the safe disks, prefer it
+//  4. Otherwise, return the first safe disk
+func ResolveInstallDiskFromInfo(hw *HardwareInfo, configuredDisk string) (string, error) {
+	var safes []string
+	for _, d := range hw.NVMeDisks {
+		if !hw.CephDisks[d] {
+			safes = append(safes, d)
+		}
+	}
+
+	if len(safes) == 0 {
+		if len(hw.NVMeDisks) == 0 {
+			return configuredDisk, nil // no NVMe disks found — fall back to configured
+		}
+		return "", fmt.Errorf("all NVMe disks have Ceph BlueStore data — cannot determine install disk safely")
+	}
+
+	// Prefer the configured disk if it's in the safe list.
+	for _, d := range safes {
+		if d == configuredDisk {
+			return configuredDisk, nil
+		}
+	}
+
+	return safes[0], nil
+}
+
 // ResolveInstallDisk determines the correct install disk in the rescue environment.
 // NVMe device names (nvme0n1, nvme1n1) can swap between rescue and Talos boot
 // due to different PCI probe order. This function finds the correct disk by
@@ -157,88 +274,64 @@ func (c *Client) ResolveInstallDisk(configuredDisk string) (string, error) {
 	return resolved, nil
 }
 
-// WipeOSDisk wipes only the OS install disk, leaving all other disks untouched.
-// During reprovision, Ceph OSD data on other disks (e.g. nvme1n1) must survive —
-// wiping them would destroy storage cluster data and force a full rebuild.
-// Only the OS disk needs a clean slate for Talos installation.
+// WipeAllDisks wipes all specified disks in parallel using a single SSH command.
+// Each disk undergoes a thorough wipe: wipefs + sgdisk + dd + blkdiscard.
+// blkdiscard alone is NOT enough — NVMe TRIM is advisory, the controller may
+// delay data erasure. Talos STATE partition survives TRIM and boots with old config.
 //
-// Uses blkdiscard (fast TRIM) with dd fallback (zero first 2GB) to clear
-// partition tables, filesystem metadata, and any leftover signatures.
-func (c *Client) WipeOSDisk(disk string) (string, error) {
-	// Safety: refuse to wipe if the disk has Ceph BlueStore data.
-	// This prevents catastrophic data loss if NVMe device enumeration
-	// differs between rescue and Talos (e.g., nvme0n1 ↔ nvme1n1 swap).
-	checkCmd := fmt.Sprintf(
-		`if blkid %[1]q 2>/dev/null | grep -q ceph_bluestore; then `+
-			`echo "ABORT: %[1]s has Ceph BlueStore data — refusing to wipe"; exit 1; `+
-			`fi`,
-		disk,
-	)
-	if out, err := c.Run(checkCmd); err != nil {
-		return out, fmt.Errorf("disk safety check failed for %s: Ceph data detected — aborting to prevent data loss: %w", disk, err)
-	}
-
-	// Thorough wipe: wipefs + sgdisk + dd + blkdiscard.
-	// blkdiscard alone is NOT enough — NVMe TRIM is advisory, the controller may
-	// delay data erasure. Talos STATE partition survives TRIM and boots with old config.
-	cmd := fmt.Sprintf(
-		`set -e; `+
-			`echo "Wiping OS disk %[1]s..."; `+
-			`wipefs -af %[1]q 2>/dev/null || true; `+
-			`sgdisk --zap-all %[1]q 2>/dev/null || true; `+
-			`dd if=/dev/zero of=%[1]q bs=1M count=100 conv=notrunc 2>/dev/null || true; `+
-			`blkdiscard %[1]q 2>/dev/null || true; `+
-			`sync; `+
-			`echo "OS disk %[1]s wiped"`,
-		disk,
-	)
-
-	return c.Run(cmd)
-}
-
-// WipeAllDisks wipes ALL NVMe disks on the server for a fresh provision.
-// Used for storage nodes where old Talos installs on ANY disk cause boot loops —
-// the server boots from the old install instead of the new one. Unlike WipeOSDisk,
-// this does NOT check for ceph_bluestore because it is only called during fresh
-// provisioning when no Ceph data exists yet.
-//
-// The installDisk parameter is logged but all NVMe disks are wiped regardless.
-func (c *Client) WipeAllDisks(installDisk string) (string, error) {
-	// List all NVMe block devices
-	listCmd := `lsblk --noheadings --nodeps --paths --output NAME,TYPE | grep disk | grep nvme | awk '{print $1}'`
-	out, err := c.Run(listCmd)
-	if err != nil {
-		return out, fmt.Errorf("list NVMe disks: %w", err)
-	}
-
-	disks := strings.Fields(strings.TrimSpace(out))
+// The parallel approach (background subshells + wait) is significantly faster than
+// sequential wiping when multiple disks are present, as each wipe is I/O-bound.
+func (c *Client) WipeAllDisks(disks []string) (string, error) {
 	if len(disks) == 0 {
-		return "", fmt.Errorf("no NVMe disks found")
+		return "", fmt.Errorf("wipe all disks: no disks specified")
 	}
 
-	var results []string
-	for _, disk := range disks {
-		cmd := fmt.Sprintf(
-			`set -e; `+
-				`echo "Wiping disk %[1]s..."; `+
-				`wipefs -af %[1]q 2>/dev/null || true; `+
-				`sgdisk --zap-all %[1]q 2>/dev/null || true; `+
-				`dd if=/dev/zero of=%[1]q bs=1M count=100 conv=notrunc 2>/dev/null || true; `+
-				`blkdiscard %[1]q 2>/dev/null || true; `+
-				`sync; `+
-				`echo "Disk %[1]s wiped"`,
-			disk,
-		)
-		wipeOut, wipeErr := c.Run(cmd)
-		if wipeErr != nil {
-			return wipeOut, fmt.Errorf("wipe disk %s: %w", disk, wipeErr)
+	// Build the disk list for the shell for-loop.
+	// Each disk path is shell-quoted to prevent injection.
+	var quotedDisks []string
+	for _, d := range disks {
+		quotedDisks = append(quotedDisks, shellQuote(d))
+	}
+
+	cmd := fmt.Sprintf(
+		`for d in %s; do `+
+			`(wipefs -af "$d" 2>/dev/null; `+
+			`sgdisk --zap-all "$d" 2>/dev/null; `+
+			`dd if=/dev/zero of="$d" bs=1M count=100 conv=notrunc 2>/dev/null; `+
+			`blkdiscard "$d" 2>/dev/null; `+
+			`sync; `+
+			`echo "WIPED=$d") & `+
+			`done; `+
+			`wait; `+
+			`echo "ALL_DONE"`,
+		strings.Join(quotedDisks, " "),
+	)
+
+	out, err := c.Run(cmd)
+	if err != nil {
+		return out, fmt.Errorf("wipe all disks: %w\nOutput: %s", err, out)
+	}
+
+	// Verify all disks were wiped by checking for WIPED= lines.
+	wiped := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "WIPED=") {
+			wiped[strings.TrimPrefix(line, "WIPED=")] = true
 		}
-		results = append(results, strings.TrimSpace(wipeOut))
 	}
 
-	summary := fmt.Sprintf("Wiped %d NVMe disks (install=%s): %s", len(disks), installDisk, strings.Join(disks, ", "))
-	results = append(results, summary)
-	return strings.Join(results, "\n"), nil
+	var missing []string
+	for _, d := range disks {
+		if !wiped[d] {
+			missing = append(missing, d)
+		}
+	}
+	if len(missing) > 0 {
+		return out, fmt.Errorf("wipe all disks: %d disk(s) not confirmed wiped: %s", len(missing), strings.Join(missing, ", "))
+	}
+
+	return out, nil
 }
 
 // ResolveStableDiskPath resolves a bare NVMe device path (e.g. /dev/nvme0n1)
@@ -314,6 +407,7 @@ func (c *Client) ResolveStableDiskPath(disk string) (string, error) {
 //  1. Download crane (static OCI tool, ~15MB) + export installer image
 //  2. Extract full OCI filesystem to /tmp/talos-root
 //  3. unshare --mount --pid --fork: mount /proc + /sys + /dev, run installer
+//  4. Fix EFI boot order from rescue (outside chroot/unshare)
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
 	// Derive OCI registry hostname from factoryURL.
 	registryHost := factoryURL
@@ -346,23 +440,7 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 		return fmt.Errorf("extract installer filesystem: %w\nOutput: %s", err, out)
 	}
 
-	// Step 3: Safety — verify the install disk is NOT the Ceph data disk.
-	// NVMe device enumeration can swap between rescue and Talos boot
-	// (different PCI probe order). Refusing to install if target has BlueStore.
-	safetyCmd := fmt.Sprintf(
-		`if blkid %[1]q 2>/dev/null | grep -q ceph_bluestore; then `+
-			`echo "FATAL: install target %[1]s has Ceph BlueStore — wrong disk!"; exit 1; `+
-			`fi; `+
-			// Also verify: list ALL disks with BlueStore and ensure we're not about to overwrite one
-			`echo "Disk safety check passed for %[1]s"`,
-		disk,
-	)
-	if out, err := c.Run(safetyCmd); err != nil {
-		_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
-		return fmt.Errorf("SAFETY ABORT: install target %s appears to be the Ceph data disk: %w\nOutput: %s", disk, err, out)
-	}
-
-	// Step 4: Run installer inside unshare namespace
+	// Step 3: Run installer inside unshare namespace
 	// unshare provides mount namespace so the installer can access /proc, /sys, /dev.
 	//
 	// Key details:
@@ -371,8 +449,8 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error
 	//   - /sys: --rbind host sysfs (not mount -t sysfs) so go-efilib can access
 	//     /sys/firmware/efi/efivars for UEFI NVRAM boot entry creation
 	//   - /dev: --rbind host devtmpfs for block device access
-	//   - --force: required because WipeOSDisk uses blkdiscard (not partition delete),
-	//     so the disk may still have partition metadata that blocks mkfs
+	//   - --force: required because WipeAllDisks clears partition metadata, but the
+	//     disk may still have residual signatures that block mkfs
 	installCmd := fmt.Sprintf(
 		"unshare --mount --pid --fork -- bash -c '"+
 			"mount --rbind /sys /tmp/talos-root/sys && "+

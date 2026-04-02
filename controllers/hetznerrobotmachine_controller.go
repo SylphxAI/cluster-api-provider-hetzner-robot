@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	requeueAfterShort = 15 * time.Second
-	requeueAfterLong  = 60 * time.Second
+	requeueAfterShort  = 15 * time.Second
+	requeueAfterMedium = 20 * time.Second
+	requeueAfterLong   = 60 * time.Second
 
 	talosFactoryDefaultBaseURL = "https://factory.talos.dev"
 )
@@ -303,8 +304,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, hrh, serverID, serverIP)
 	case infrav1.StateWaitingForBoot:
 		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
-	case infrav1.StateBootstrapping:
-		return r.stateBootstrap(ctx, hrm, machine, cluster, serverIP)
+	// StateBootstrapping removed — CACPPT handles etcd bootstrap, not CAPHR.
 	case infrav1.StateError:
 		// Terminal state. No auto-recovery. No polling.
 		// Recovery via MachineHealthCheck remediation or manual Machine deletion.
