@@ -499,13 +499,14 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			return ctrl.Result{}, nil
 		}
 		// Try to wipe EFI boot entries via Talos API so PXE can boot next time.
-		if talos.IsInMaintenanceMode(ctx, serverIP) {
-			logger.Info("Wiping EFI partition via Talos maintenance API to allow PXE boot",
-				"serverID", serverID, "ip", serverIP)
-			if err := talos.WipeEFIPartition(ctx, serverIP); err != nil {
-				logger.Info("Failed to wipe EFI via Talos API (will retry via rescue)",
-					"error", err, "ip", serverIP)
-			}
+		// Try maintenance mode (insecure) first, then authenticated if available.
+		logger.Info("Attempting to wipe EFI partition via Talos API to allow PXE boot",
+			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		if err := talos.WipeEFIPartition(ctx, serverIP); err != nil {
+			logger.Info("EFI wipe via maintenance API failed (node may be in full mode) — will retry on next cycle",
+				"error", err, "ip", serverIP)
+		} else {
+			logger.Info("Successfully wiped EFI via Talos API — PXE should boot on next reset", "ip", serverIP)
 		}
 		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
 			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)

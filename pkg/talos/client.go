@@ -118,6 +118,45 @@ func WipeEFIPartition(ctx context.Context, ip string) error {
 	return nil
 }
 
+// WipeEFIPartitionAuthenticated connects to a Talos node in FULL mode
+// (with mTLS authentication) and wipes EFI + STATE partitions.
+// Used when the node booted into full Talos (not maintenance) and
+// the maintenance API is not available.
+func WipeEFIPartitionAuthenticated(ctx context.Context, ip string, machineConfigYAML []byte) error {
+	wipeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	tlsConfig, err := AdminTLSConfig(machineConfigYAML)
+	if err != nil {
+		return fmt.Errorf("build TLS config for %s: %w", ip, err)
+	}
+
+	conn, err := grpc.DialContext(wipeCtx,
+		net.JoinHostPort(ip, strconv.Itoa(TalosAPIPort)),
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+		grpc.WithDefaultCallOptions(grpc.WaitForReady(false)),
+	)
+	if err != nil {
+		return fmt.Errorf("connect to %s (authenticated): %w", ip, err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	client := machinepb.NewMachineServiceClient(conn)
+	_, err = client.Reset(wipeCtx, &machinepb.ResetRequest{
+		Graceful: false,
+		Reboot:   true,
+		SystemPartitionsToWipe: []*machinepb.ResetPartitionSpec{
+			{Label: "EFI"},
+			{Label: "BIOS"},
+			{Label: "STATE"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("authenticated reset with EFI wipe on %s: %w", ip, err)
+	}
+	return nil
+}
+
 // IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.
 func IsK8sAPIUp(ctx context.Context, ip string) bool {
 	return tcpReachable(ctx, ip, 6443)
