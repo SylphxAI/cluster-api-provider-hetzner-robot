@@ -41,8 +41,8 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	logger := log.FromContext(ctx)
 
 	if hrm.Status.RetryCount > maxResetRetries {
-		logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual intervention via Hetzner Robot panel",
-			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+		logger.Info("Rescue boot failed after max retries — server needs manual intervention via Hetzner Robot panel",
+			"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
 		hrm.Status.ProvisioningState = infrav1.StateError
 		return ctrl.Result{}, nil
 	}
@@ -111,7 +111,7 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 				// Fix EFI boot order to PXE first, then reboot into rescue.
 				logger.Info("SSH reachable but not rescue (existing OS detected), fixing EFI boot order",
 					"ip", serverIP)
-				_, _ = client.Run(`
+				efiOut, efiErr := client.Run(`
 					if command -v efibootmgr > /dev/null 2>&1; then
 						mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 						mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
@@ -121,7 +121,13 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 					fi
 					nohup bash -c 'sleep 1 && reboot' &>/dev/null &
 				`)
-				logger.Info("Rebooted existing OS with PXE-only EFI, should enter rescue on next boot", "ip", serverIP)
+				if efiErr != nil {
+					logger.Info("EFI boot order fix via SSH failed (non-fatal, will retry via rescue)",
+						"error", efiErr, "output", efiOut, "ip", serverIP)
+				} else {
+					logger.Info("Rebooted existing OS with PXE-only EFI, should enter rescue on next boot",
+						"output", efiOut, "ip", serverIP)
+				}
 				return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
 			}
 		}
@@ -162,8 +168,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		now := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now
 		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual BIOS intervention (set PXE as first boot option)",
-				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			logger.Info("Rescue boot failed after max retries — server needs manual BIOS intervention (set PXE as first boot option)",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
 			hrm.Status.ProvisioningState = infrav1.StateError
 			return ctrl.Result{}, nil
 		}
@@ -197,8 +203,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		now2 := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now2
 		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Error(nil, "FATAL: server keeps booting Talos instead of PXE rescue after max retries — needs manual BIOS intervention",
-				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			logger.Info("Server keeps booting Talos instead of PXE rescue after max retries — needs manual BIOS intervention",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
 			hrm.Status.ProvisioningState = infrav1.StateError
 			return ctrl.Result{}, nil
 		}
@@ -240,19 +246,19 @@ func (r *HetznerRobotMachineReconciler) attemptEFIWipe(
 	// Insecure wipe failed — node is likely in full mode (requires mTLS).
 	// Fall back to authenticated wipe using bootstrap data.
 	if machine == nil {
-		logger.Info("EFI wipe via maintenance API failed and no Machine available for authenticated wipe",
-			"ip", serverIP)
+		logger.Info("EFI wipe failed: maintenance API rejected and no Machine available for authenticated fallback",
+			"ip", serverIP, "outcome", "will_retry")
 		return
 	}
 	machineConfigData, err := r.getBootstrapData(ctx, machine)
 	if err != nil {
-		logger.Info("EFI wipe via maintenance API failed, cannot get bootstrap data for authenticated wipe",
-			"error", err, "ip", serverIP)
+		logger.Info("EFI wipe failed: cannot get bootstrap data for authenticated fallback",
+			"error", err, "ip", serverIP, "outcome", "will_retry")
 		return
 	}
 	if err := talos.WipeEFIPartitionAuthenticated(ctx, serverIP, machineConfigData); err != nil {
-		logger.Info("Both maintenance and authenticated EFI wipe failed — will retry on next cycle",
-			"error", err, "ip", serverIP)
+		logger.Info("EFI wipe failed: both maintenance and authenticated attempts unsuccessful",
+			"error", err, "ip", serverIP, "outcome", "will_retry")
 		return
 	}
 	logger.Info("Successfully wiped EFI via authenticated Talos API — PXE should boot on next reset",
@@ -305,8 +311,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		now := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now
 		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Error(nil, "FATAL: server keeps booting normal OS instead of rescue after max retries — EFI boot order needs manual intervention via Hetzner Robot panel",
-				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+			logger.Info("Server keeps booting normal OS instead of rescue after max retries — EFI boot order needs manual intervention via Hetzner Robot panel",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
 			hrm.Status.ProvisioningState = infrav1.StateError
 			return ctrl.Result{}, nil
 		}
