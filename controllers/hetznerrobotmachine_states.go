@@ -1,0 +1,785 @@
+package controllers
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/patch"
+
+	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
+	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/robot"
+	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/sshrescue"
+	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/talos"
+)
+
+// maxResetRetries is the maximum number of hw reset attempts before marking the machine
+// as failed. If rescue boot keeps failing (EFI boot order issue), the post-install
+// efibootmgr fix will prevent recurrence. For the initial case, an operator must
+// manually request a reset via Hetzner Robot panel.
+const maxResetRetries = 8
+
+// stateActivateRescue activates rescue mode via Robot API and triggers a hw reset.
+// After maxResetRetries failed attempts, marks the machine as failed (StateError).
+// An operator must then manually fix the server (e.g., Hetzner Robot panel manual reset)
+// and reset the Machine status to retry.
+func (r *HetznerRobotMachineReconciler) stateActivateRescue(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if hrm.Status.RetryCount > maxResetRetries {
+		logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual intervention via Hetzner Robot panel",
+			"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+		hrm.Status.ProvisioningState = infrav1.StateError
+		return ctrl.Result{}, nil
+	}
+
+	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get SSH key fingerprint: %w", err)
+	}
+
+	_, err = robotClient.ActivateRescue(ctx, serverID, sshFingerprint)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("activate rescue on server %d: %w", serverID, err)
+	}
+
+	logger.Info("Activating rescue mode", "serverID", serverID, "ip", serverIP,
+		"retryCount", hrm.Status.RetryCount)
+
+	if err := robotClient.ResetServer(ctx, serverID, robot.ResetTypeHardware); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", serverID, err)
+	}
+
+	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
+	logger.Info("Rescue activated, server resetting", "serverID", serverID)
+	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
+}
+
+// stateCheckRescueActive waits for SSH to be available in rescue mode.
+// If rescue is no longer active (server rebooted back to normal OS), it re-activates
+// rescue and triggers another hardware reset automatically.
+func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Priority 1: Check Talos maintenance mode (UEFI NVMe-first boot order may skip rescue PXE).
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos maintenance mode detected, skipping rescue/install", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Priority 2: Check if rescue SSH is already up.
+	// IMPORTANT: Must verify it's actually rescue, not a pre-existing OS (Debian/Talos).
+	// A pre-existing OS has SSH on port 22 too — treating it as rescue causes installer
+	// failures (installer expects rescue environment, not a running OS).
+	if sshrescue.IsReachable(serverIP) {
+		privateKey, keyErr := r.getSSHPrivateKey(ctx, hrc)
+		if keyErr == nil {
+			client := sshrescue.New(serverIP, privateKey)
+			if connErr := client.Connect(); connErr == nil {
+				defer client.Close()
+				// Hetzner rescue has hostname "rescue" and /etc/hetzner-build
+				out, _ := client.Run("([ \"$(hostname)\" = \"rescue\" ] || test -f /etc/hetzner-build) && echo RESCUE || echo NOT_RESCUE")
+				if strings.TrimSpace(out) == "RESCUE" {
+					logger.Info("Rescue SSH reachable and verified", "ip", serverIP)
+					hrm.Status.ProvisioningState = infrav1.StateInRescue
+					return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+				}
+				// SSH reachable but NOT rescue — server booted existing OS.
+				// Fix EFI boot order to PXE first, then reboot into rescue.
+				logger.Info("SSH reachable but not rescue (existing OS detected), fixing EFI boot order",
+					"ip", serverIP)
+				_, _ = client.Run(`
+					if command -v efibootmgr > /dev/null 2>&1; then
+						mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
+						mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+						for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+							efibootmgr -b "$entry" -B 2>/dev/null
+						done
+					fi
+					nohup bash -c 'sleep 1 && reboot' &>/dev/null &
+				`)
+				logger.Info("Rebooted existing OS with PXE-only EFI, should enter rescue on next boot", "ip", serverIP)
+				return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
+			}
+		}
+		// SSH reachable but can't authenticate — might be rescue with wrong key or existing OS
+		logger.Info("SSH port open but cannot authenticate, waiting for rescue", "ip", serverIP)
+	}
+
+	// Priority 3: Check Robot API rescue status.
+	// Only re-activate if BOTH rescue is inactive AND SSH is closed (server rebooted to normal OS).
+	rescueStatus, err := robotClient.GetRescueStatus(ctx, serverID)
+	if err != nil {
+		logger.Error(err, "Failed to get rescue status, will retry", "serverID", serverID)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	if !rescueStatus.Active {
+		// Rescue inactive AND SSH closed. Could mean:
+		//   (a) Server rebooted back to normal OS (old Talos running, NOT our cluster) → re-activate rescue
+		//   (b) Talos was successfully installed and is in maintenance mode → proceed
+		//   (c) Talos was successfully installed, config applied, running in full mode → advance
+		//
+		// IMPORTANT: We can ONLY safely skip rescue/install if Talos is in maintenance mode.
+		// If Talos is in full running mode, we CANNOT distinguish between:
+		//   - Our freshly installed Talos (config applied, node joined) → safe to advance
+		//   - An OLD Talos from a previous cluster (different CA) → MUST rescue+wipe
+		//
+		// Since the HRM is not yet in StateProvisioned (we're in StateCheckRescueActive),
+		// the only safe assumption for full-mode Talos is: it's stale. Re-activate rescue.
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			// Maintenance mode: Talos installed, waiting for machineconfig.
+			logger.Info("Talos in maintenance mode (rescue consumed after install), proceeding", "ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// Either Talos is in full mode (stale OS) or not reachable at all.
+		// In both cases, re-activate rescue and wipe.
+		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: rescue boot failed after max retries — server needs manual BIOS intervention (set PXE as first boot option)",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		if talos.IsUp(ctx, serverIP) {
+			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, re-activating rescue",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		} else {
+			logger.Info("Rescue no longer active and nothing reachable, re-activating rescue",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		}
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// Rescue is armed but SSH not up yet.
+	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
+	// of the rescue system. Detect this by checking if Talos is already up.
+	if talos.IsUp(ctx, serverIP) {
+		if talos.IsInMaintenanceMode(ctx, serverIP) && hrm.Status.PrimaryMAC != "" {
+			// Talos maintenance mode AND we already have hardware info from rescue.
+			// Skip rescue, proceed directly to config apply.
+			logger.Info("Rescue active but Talos booted from disk in maintenance mode — skipping rescue/install", "ip", serverIP)
+			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+		}
+		// Talos booted instead of PXE rescue (maintenance or full mode).
+		// EFI boot order has Talos UKI before PXE — need to wipe EFI and retry.
+		hrm.Status.RetryCount++
+		now2 := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now2
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: server keeps booting Talos instead of PXE rescue after max retries — needs manual BIOS intervention",
+				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		// Try to wipe EFI boot entries via Talos API so PXE can boot next time.
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			logger.Info("Wiping EFI partition via Talos maintenance API to allow PXE boot",
+				"serverID", serverID, "ip", serverIP)
+			if err := talos.WipeEFIPartition(ctx, serverIP); err != nil {
+				logger.Info("Failed to wipe EFI via Talos API (will retry via rescue)",
+					"error", err, "ip", serverIP)
+			}
+		}
+		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
+			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// Neither SSH (rescue) nor Talos (disk) is up — server is still booting.
+	logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
+	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+}
+
+// stateInstallTalos SSHes into rescue and installs Talos.
+func (r *HetznerRobotMachineReconciler) stateInstallTalos(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Recovery: if Talos maintenance mode is already up (install succeeded but state wasn't saved),
+	// skip to BootingTalos state.
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos already in maintenance mode (install completed), skipping re-install", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Also recovery: if port 22 is not accessible, the node may have already rebooted
+	// from a previous install attempt. Activate rescue again and retry.
+	if !sshrescue.IsReachable(serverIP) {
+		logger.Info("Rescue SSH not reachable in InRescue state, activating rescue again", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateNone
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// CRITICAL: SSH reachable does NOT mean rescue mode. A server running a normal OS
+	// (Debian with cephadm, old Talos) also has SSH on port 22. Installing Talos on a
+	// running production server would destroy it. Verify rescue before proceeding.
+	privateKey, err := r.getSSHPrivateKey(ctx, hrc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get SSH private key for rescue check: %w", err)
+	}
+	isRescue, rescueErr := sshrescue.IsRescueMode(serverIP, privateKey)
+	if rescueErr != nil {
+		// SSH auth failure or command failure — cannot determine state. Retry.
+		logger.Info("Could not verify rescue mode, will retry", "ip", serverIP, "error", rescueErr)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+	if !isRescue {
+		// Server is running a normal OS, not rescue. Re-activate rescue + hw reset.
+		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
+		if hrm.Status.RetryCount > maxResetRetries {
+			logger.Error(nil, "FATAL: server keeps booting normal OS instead of rescue after max retries — EFI boot order needs manual intervention via Hetzner Robot panel",
+				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+			hrm.Status.ProvisioningState = infrav1.StateError
+			return ctrl.Result{}, nil
+		}
+		logger.Info("Server running normal OS instead of rescue, re-activating rescue and triggering hw reset",
+			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	logger.Info("Rescue mode verified, installing Talos via rescue SSH", "ip", serverIP)
+
+	// privateKey already retrieved above for the rescue mode check — reuse it.
+	sshClient := sshrescue.New(serverIP, privateKey)
+	if err := sshClient.Connect(); err != nil {
+		return ctrl.Result{}, fmt.Errorf("SSH connect to rescue %s: %w", serverIP, err)
+	}
+	defer sshClient.Close()
+
+	// Auto-detect primary NIC MAC address from rescue.
+	// Used for Talos deviceSelector (hardware-based, not name-based).
+	// NIC names differ between rescue (eth0) and Talos (enp193s0f0np0) — MAC is stable.
+	primaryMAC, err := sshClient.Run(`ip link show $(ip route show default | awk '{print $5}') | grep ether | awk '{print $2}'`)
+	if err != nil || strings.TrimSpace(primaryMAC) == "" {
+		return ctrl.Result{}, fmt.Errorf("detect primary NIC MAC on %s: %w (output: %s)", serverIP, err, primaryMAC)
+	}
+	primaryMAC = strings.TrimSpace(primaryMAC)
+	hrm.Status.PrimaryMAC = primaryMAC
+	logger.Info("Detected primary NIC MAC", "mac", primaryMAC, "ip", serverIP)
+
+	// Auto-detect default gateway IP from rescue routing table.
+	// Stored in status so stateApplyConfig can inject static routes into the
+	// Talos machineconfig. Required because we use /32 addresses (not DHCP)
+	// to avoid Hetzner's L2 isolation issue with /25 on-link routes.
+	gatewayIP, err := sshClient.Run("ip route | grep default | awk '{print $3}' | head -1")
+	if err != nil || strings.TrimSpace(gatewayIP) == "" {
+		return ctrl.Result{}, fmt.Errorf("detect default gateway on %s: %w (output: %s)", serverIP, err, gatewayIP)
+	}
+	gatewayIP = strings.TrimSpace(gatewayIP)
+	hrm.Status.GatewayIP = gatewayIP
+	logger.Info("Detected default gateway", "gateway", gatewayIP, "ip", serverIP)
+
+	configuredDisk := hrm.Spec.InstallDisk
+	if configuredDisk == "" {
+		configuredDisk = "/dev/nvme0n1"
+	}
+
+	// Resolve the actual install disk by checking which NVMe device is safe.
+	// NVMe device names can swap between rescue and Talos boot due to different
+	// PCI probe order. ResolveInstallDisk picks the disk WITHOUT Ceph BlueStore.
+	installDisk, err := sshClient.ResolveInstallDisk(configuredDisk)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve install disk on %s: %w", serverIP, err)
+	}
+	if installDisk != configuredDisk {
+		logger.Info("Install disk resolved to different device (NVMe name swap detected)",
+			"configured", configuredDisk, "resolved", installDisk, "ip", serverIP)
+	}
+
+	// Resolve the install disk to a stable /dev/disk/by-id/ path.
+	// NVMe device names (/dev/nvme0n1) swap between rescue and Talos boot due to
+	// different PCI probe order. The by-id path references the physical disk by
+	// serial number, so both the installer in rescue AND Talos at boot will
+	// reference the same physical disk regardless of enumeration order.
+	stableDisk, err := sshClient.ResolveStableDiskPath(installDisk)
+	if err != nil {
+		// Non-fatal: fall back to unstable path
+		logger.Info("Could not resolve stable disk path, using bare device name",
+			"disk", installDisk, "error", err)
+		stableDisk = installDisk
+	}
+	if stableDisk != installDisk {
+		logger.Info("Resolved install disk to stable by-id path",
+			"bare", installDisk, "stable", stableDisk, "ip", serverIP)
+	}
+
+	// Persist the stable disk path in status so stateApplyConfig can inject it
+	// into the Talos machineconfig. This ensures Talos uses the by-id path for
+	// upgrades, surviving NVMe enumeration changes across reboots.
+	hrm.Status.ResolvedInstallDisk = stableDisk
+
+	// Storage nodes (ephemeralSize set): wipe ALL NVMe disks for fresh provision.
+	// Old Talos installs on OTHER disks cause boot loops — the server boots from
+	// the old install instead of the new one. This is safe because fresh storage
+	// nodes have no existing Ceph data.
+	//
+	// Compute nodes (no ephemeralSize): wipe ONLY the OS install disk.
+	// Ceph OSD data on other disks must survive reprovision.
+	isStorageNode := hrm.Spec.EphemeralSize != ""
+	if isStorageNode {
+		logger.Info("Storage node: wiping ALL NVMe disks for fresh provision",
+			"ip", serverIP, "installDisk", stableDisk, "ephemeralSize", hrm.Spec.EphemeralSize)
+		if out, err := sshClient.WipeAllDisks(stableDisk); err != nil {
+			return ctrl.Result{}, fmt.Errorf("wipe all disks on %s: %w\nOutput: %s", serverIP, err, out)
+		} else {
+			logger.Info("All NVMe disks wiped", "ip", serverIP, "output", out)
+		}
+	} else {
+		logger.Info("Compute node: wiping OS disk only", "ip", serverIP, "disk", stableDisk)
+		if out, err := sshClient.WipeOSDisk(installDisk); err != nil {
+			return ctrl.Result{}, fmt.Errorf("wipe OS disk %s on %s: %w\nOutput: %s", installDisk, serverIP, err, out)
+		} else {
+			logger.Info("OS disk wiped", "ip", serverIP, "disk", installDisk, "output", out)
+		}
+	}
+
+	factoryURL := hrc.Spec.TalosFactoryBaseURL
+	if factoryURL == "" {
+		factoryURL = talosFactoryDefaultBaseURL
+	}
+
+	// Use the BARE device path for the Talos installer in rescue chroot.
+	// The by-id symlinks (/dev/disk/by-id/) may not exist inside the unshare chroot
+	// because udev doesn't run there. The stable by-id path is only used for the
+	// machineconfig (injected in stateApplyConfig), where Talos has full udev.
+	if err := sshClient.InstallTalos(
+		factoryURL,
+		hrm.Spec.TalosSchematic,
+		hrm.Spec.TalosVersion,
+		installDisk, // bare path like /dev/nvme0n1 — works in rescue chroot
+	); err != nil {
+		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
+	}
+
+	logger.Info("Talos image written, fixing EFI boot order post-install", "ip", serverIP)
+
+	// Fix EFI boot order after Talos install: delete ALL non-Talos, non-PXE
+	// entries (e.g. old Debian "UEFI OS"), then set Talos FIRST, PXE LAST.
+	// Some Hetzner BIOS firmwares ignore BootOrder and use their own NVMe
+	// boot priority — deleting competing entries is the only reliable fix.
+	if out, err := sshClient.Run(`
+		if command -v efibootmgr > /dev/null 2>&1; then
+			# Mount efivars read-write (rescue mounts it read-only by default)
+			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
+			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
+
+			echo "Before cleanup:"
+			efibootmgr
+
+			# Delete ALL boot entries except PXE/Network and Talos
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6\|talos' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+				echo "Deleting non-Talos/non-PXE entry: Boot${entry}"
+				efibootmgr -b "$entry" -B 2>/dev/null || true
+			done
+
+			# Set boot order: Talos first, PXE last
+			TALOS_NUM=$(efibootmgr | grep -i 'Talos' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
+			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
+			if [ -n "$TALOS_NUM" ] && [ -n "$PXE_NUMS" ]; then
+				efibootmgr -o "${TALOS_NUM},${PXE_NUMS}" 2>&1
+			elif [ -n "$TALOS_NUM" ]; then
+				efibootmgr -o "${TALOS_NUM}" 2>&1
+			fi
+
+			echo "After cleanup:"
+			efibootmgr
+		fi
+	`); err != nil {
+		logger.Info("Post-install EFI fix failed (non-fatal)", "error", err, "output", out)
+	} else {
+		logger.Info("Post-install EFI boot order fix applied", "output", out)
+	}
+
+	// Deactivate rescue BEFORE rebooting. PXE is first in boot order but rescue is
+	// deactivated, so PXE silently fails → falls through to Talos.
+	if err := robotClient.DeactivateRescue(ctx, serverID); err != nil {
+		// Non-fatal: worst case the server boots back into rescue, and the next
+		// reconcile (stateWaitInstall) will detect it and retry.
+		logger.Error(err, "Failed to deactivate rescue, server may boot back to rescue",
+			"serverID", serverID)
+	}
+
+	// Reboot into Talos
+	sshClient.Run("reboot") //nolint:errcheck // reboot disconnects SSH, error expected
+
+	hrm.Status.ProvisioningState = infrav1.StateInstalling
+	return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+}
+
+// stateWaitInstall transitions to BootingTalos after giving install time to complete.
+func (r *HetznerRobotMachineReconciler) stateWaitInstall(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	hrc *infrav1.HetznerRobotCluster,
+	robotClient *robot.Client,
+	serverID int,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Check if Talos maintenance mode is already up
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos maintenance mode detected after install", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Edge case: if Talos is up but NOT in maintenance mode, the dd install
+	// didn't fully wipe the STATE partition — old config persisted and Talos
+	// booted in full mode. Re-activate rescue to wipe and reinstall cleanly.
+	if talos.IsUp(ctx, serverIP) {
+		logger.Info("Talos booted in full mode after install (old config persisted) — re-activating rescue to reinstall",
+			"serverID", serverID, "ip", serverIP)
+		hrm.Status.RetryCount++
+		now := metav1.Now()
+		hrm.Status.LastRetryTimestamp = &now
+		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+	}
+
+	// DO NOT check sshrescue.IsReachable() here. After stateInstallTalos sends the
+	// `reboot` command, the status patch triggers a watch event → immediate reconcile.
+	// SSH port 22 stays open for several seconds after `reboot` is issued (the SSH
+	// daemon hasn't shut down yet). Checking rescue SSH here would wrongly set
+	// state=InRescue → trigger reinstall on a half-rebooted server → SSH drops
+	// mid-wipe → state corruption. Only look for positive Talos signals.
+
+	// Still waiting for reboot — stay in StateInstalling until maintenance mode is detected
+	logger.Info("Waiting for Talos to boot (not yet in maintenance mode)", "ip", serverIP)
+	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+}
+
+// stateWaitTalosMaintenanceMode waits until port 50000 is reachable.
+func (r *HetznerRobotMachineReconciler) stateWaitTalosMaintenanceMode(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	cluster *clusterv1.Cluster,
+	hrc *infrav1.HetznerRobotCluster,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos not yet in maintenance mode", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	logger.Info("Talos in maintenance mode, proceeding to apply config", "ip", serverIP)
+
+	// Set control plane endpoint on cluster if this is a control plane machine
+	// and endpoint is not yet set. Use patch helper to avoid version conflicts
+	// (r.Update would fail if the object was modified between read and write).
+	if util.IsControlPlaneMachine(machine) && hrc.Spec.ControlPlaneEndpoint.Host == "" {
+		hrcPatchHelper, patchErr := patch.NewHelper(hrc, r.Client)
+		if patchErr != nil {
+			return ctrl.Result{}, fmt.Errorf("init HRC patch helper: %w", patchErr)
+		}
+		hrc.Spec.ControlPlaneEndpoint = clusterv1.APIEndpoint{
+			Host: serverIP,
+			Port: 6443,
+		}
+		if patchErr = hrcPatchHelper.Patch(ctx, hrc); patchErr != nil {
+			return ctrl.Result{}, fmt.Errorf("patch control plane endpoint: %w", patchErr)
+		}
+		logger.Info("Set control plane endpoint", "host", serverIP)
+	}
+
+	hrm.Status.ProvisioningState = infrav1.StateApplyingConfig
+	return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+}
+
+func (r *HetznerRobotMachineReconciler) stateApplyConfig(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	cluster *clusterv1.Cluster,
+	hrc *infrav1.HetznerRobotCluster,
+	hrh *infrav1.HetznerRobotHost,
+	serverID int,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Get bootstrap data from CAPT bootstrap secret
+	bootstrapData, err := r.getBootstrapData(ctx, machine)
+	if err != nil {
+		logger.Error(err, "Bootstrap data not ready yet")
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Inject install disk into machineconfig — CAPT doesn't include it,
+	// but Talos requires machine.install.disk to be set.
+	// Prefer the stable /dev/disk/by-id/ path resolved during rescue install.
+	// This ensures Talos references the correct physical disk regardless of
+	// NVMe enumeration order (which can differ between rescue and Talos boot).
+	installDisk := hrm.Status.ResolvedInstallDisk
+	if installDisk == "" {
+		// Fallback for machines provisioned before this fix was deployed
+		installDisk = hrm.Spec.InstallDisk
+		if installDisk == "" {
+			installDisk = "/dev/nvme0n1"
+		}
+	}
+	bootstrapData, err = injectInstallDisk(bootstrapData, installDisk)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("inject install disk into config: %w", err)
+	}
+	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
+
+	// Primary NIC MAC — detected during rescue install, stored in status
+	primaryMAC := hrm.Status.PrimaryMAC
+	if primaryMAC == "" {
+		return ctrl.Result{}, fmt.Errorf("primary NIC MAC not detected — machine must go through rescue install first")
+	}
+
+	// Inject VLAN config if configured on the cluster.
+	// Uses static /32 IP + explicit default route instead of DHCP to avoid Hetzner's
+	// L2 isolation issue. DHCP assigns /25 which creates on-link routes — servers in
+	// the same /25 try direct ARP instead of routing through the gateway. Hetzner
+	// blocks this, breaking inter-node connectivity.
+	if hrc.Spec.VLANConfig != nil {
+		internalIP := hrh.Spec.InternalIP
+		if internalIP == "" {
+			return ctrl.Result{}, fmt.Errorf("VLANConfig is set on cluster but host %s has no internalIP", hrh.Name)
+		}
+		gatewayIP := hrm.Status.GatewayIP
+		if gatewayIP == "" {
+			return ctrl.Result{}, fmt.Errorf("gateway IP not detected — machine must go through rescue install first")
+		}
+		bootstrapData, err = injectVLANConfig(bootstrapData, hrc.Spec.VLANConfig, internalIP, primaryMAC, serverIP, gatewayIP)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject VLAN config: %w", err)
+		}
+		logger.Info("Injected VLAN config into machineconfig",
+			"vlanID", hrc.Spec.VLANConfig.ID,
+			"internalIP", internalIP,
+			"serverIP", serverIP+"/32",
+			"gatewayIP", gatewayIP)
+	}
+
+	// Inject deterministic hostname: <role>-<dc>-<serverID>.
+	// Role from HetznerRobotHost label (storage → "storage-", else "compute-").
+	// Server ID is immutable (Hetzner hardware ID) — zero collision risk.
+	{
+		dc := hrc.Spec.DC
+		hostRole := hrh.Labels["role"]
+		bootstrapData, err = injectHostname(bootstrapData, dc, serverID, hostRole)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
+		}
+		if dc == "" {
+			dc = "fsn1"
+		}
+		prefix := "compute"
+		if hostRole == "storage" {
+			prefix = "storage"
+		}
+		hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
+		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
+	}
+
+	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
+	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.
+	if hrh.Spec.ServerIPv6Net != "" {
+		bootstrapData, err = injectIPv6Config(bootstrapData, hrh.Spec.ServerIPv6Net, primaryMAC, hrh.Spec.InternalIP)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject IPv6 config: %w", err)
+		}
+		logger.Info("Injected IPv6 config into machineconfig",
+			"ipv6Net", hrh.Spec.ServerIPv6Net,
+			"mac", primaryMAC)
+	}
+
+	// Inject cluster-level secrets from the Talos secret bundle.
+	// CABPT generates unique keys per Machine, but all CP nodes sharing etcd must
+	// use the same keys. Without this:
+	// - Different secretboxEncryptionSecret → new CP nodes can't decrypt existing K8s secrets
+	// - Different serviceAccount.key → API servers can't validate tokens signed by other CP nodes
+	if hrc.Spec.TalosSecretRef != nil {
+		bundle, err := r.getTalosSecretBundle(ctx, hrc)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("get talos secret bundle: %w", err)
+		}
+		if bundle != nil {
+			if s := bundle.Secrets.SecretboxEncryptionSecret; s != "" {
+				bootstrapData, err = injectSecretboxEncryptionSecret(bootstrapData, s)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("inject secretbox encryption secret: %w", err)
+				}
+				logger.Info("Injected secretboxEncryptionSecret from cluster talos secret")
+			}
+
+			if s := bundle.Secrets.K8sServiceAccount.Key; s != "" {
+				bootstrapData, err = injectServiceAccountKey(bootstrapData, s)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("inject service account key: %w", err)
+				}
+				logger.Info("Injected serviceAccount.key from cluster talos secret")
+			}
+		}
+	}
+
+	// Inject providerID into kubelet extraArgs so the Node registers with the
+	// correct providerID. Without this, CAPI can't match Machine → Node and the
+	// Machine stays in Failed phase ("Waiting for a node with matching ProviderID").
+	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
+	bootstrapData, err = injectProviderID(bootstrapData, providerID)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("inject providerID into config: %w", err)
+	}
+	logger.Info("Injected providerID into machineconfig", "providerID", providerID)
+
+	logger.Info("Applying Talos machineconfig", "ip", serverIP)
+
+	applyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	if err := talos.ApplyConfig(applyCtx, serverIP, bootstrapData); err != nil {
+		return ctrl.Result{}, fmt.Errorf("apply Talos config to %s: %w", serverIP, err)
+	}
+
+	// Set the providerID on the HRM spec (propagates to Machine via CAPI)
+	hrm.Spec.ProviderID = &providerID
+
+	// After apply-config, Talos reboots. We must wait for it to come back before bootstrapping.
+	// Move to WaitingForBoot for both CP and workers (CP will go → Bootstrapping, worker → Provisioned).
+	if util.IsControlPlaneMachine(machine) {
+		logger.Info("Config applied, waiting for Talos reboot before bootstrapping", "serverID", serverID, "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateWaitingForBoot
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	// Worker: also wait for reboot, then mark provisioned
+	logger.Info("Worker config applied, waiting for Talos reboot", "serverID", serverID, "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateWaitingForBoot
+	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+}
+
+// stateWaitForBoot waits for Talos to come back up in running stage after a config-apply reboot.
+func (r *HetznerRobotMachineReconciler) stateWaitForBoot(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !talos.IsUp(ctx, serverIP) {
+		logger.Info("Waiting for Talos to come up after config-apply reboot", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	logger.Info("Talos running after reboot", "ip", serverIP)
+
+	// Both CP and worker: mark provisioned once Talos is running.
+	// etcd bootstrap/join is CACPPT's responsibility, not CAPHR's.
+	// Workers join via bootstrap token automatically.
+	// CPs join etcd automatically via the endpoints in their machineconfig.
+	hrm.Status.ProvisioningState = infrav1.StateProvisioned
+	hrm.Status.Ready = true
+	if util.IsControlPlaneMachine(machine) {
+		logger.Info("Control plane machine provisioned — CACPPT handles etcd join", "ip", serverIP)
+	} else {
+		logger.Info("Worker machine provisioned successfully after boot", "ip", serverIP)
+	}
+	return ctrl.Result{}, nil
+}
+
+// stateBootstrap calls `talosctl bootstrap` on the init control plane to initialize etcd.
+// For joining control planes (not init), bootstrap is a no-op / returns AlreadyExists.
+func (r *HetznerRobotMachineReconciler) stateBootstrap(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	machine *clusterv1.Machine,
+	cluster *clusterv1.Cluster,
+	serverIP string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// If K8s API is already up, bootstrap already happened (e.g. additional CP joining)
+	if talos.IsK8sAPIUp(ctx, serverIP) {
+		logger.Info("K8s API already up, no bootstrap needed", "ip", serverIP)
+		hrm.Status.ProvisioningState = infrav1.StateProvisioned
+		hrm.Status.Ready = true
+		return ctrl.Result{}, nil
+	}
+
+	// Guard: if Talos API is not reachable, the node is still rebooting — wait, don't error.
+	if !talos.IsUp(ctx, serverIP) {
+		logger.Info("Talos API not yet reachable, waiting for node to finish booting", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	// Guard: if still in maintenance mode, config hasn't taken effect yet — wait.
+	if talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos still in maintenance mode, config apply not yet effective, waiting", "ip", serverIP)
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
+	// Build authenticated TLS config from the actual machineconfig applied to this node.
+	machineConfigData, err := r.getBootstrapData(ctx, machine)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get machineconfig for TLS: %w", err)
+	}
+
+	tlsCfg, err := talos.AdminTLSConfig(machineConfigData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("generate admin TLS config from machineconfig: %w", err)
+	}
+
+	logger.Info("Bootstrapping etcd on init control plane via native gRPC", "serverIP", serverIP)
+	bootstrapCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	if err := talos.Bootstrap(bootstrapCtx, serverIP, tlsCfg); err != nil {
+		// Transient errors (connection refused, timeout, AlreadyExists) → requeue, don't error.
+		// These happen when: node is mid-reboot, etcd is already bootstrapped, or API is briefly unavailable.
+		if talos.IsTransientBootstrapError(err) {
+			logger.Info("Bootstrap transient error, will retry", "ip", serverIP, "error", err.Error())
+			return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("Bootstrap on %s: %w", serverIP, err)
+	}
+
+	// Bootstrap triggered. etcd will self-start, K8s API will come up.
+	logger.Info("Bootstrap triggered successfully, marking as Provisioned", "ip", serverIP)
+	hrm.Status.ProvisioningState = infrav1.StateProvisioned
+	hrm.Status.Ready = true
+	return ctrl.Result{}, nil
+}
