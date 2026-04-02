@@ -119,7 +119,10 @@ func WipeEFIPartition(ctx context.Context, ip string) error {
 }
 
 // WipeEFIPartitionAuthenticated connects to a Talos node in FULL mode
-// (with mTLS authentication) and wipes EFI + STATE partitions.
+// (with mTLS authentication) and wipes all system partitions on the system disk.
+// Uses Mode=SYSTEM_DISK with empty SystemPartitionsToWipe to wipe ALL partitions
+// (EFI, BIOS, STATE, etc.) regardless of label names — avoids Talos v1.12 errors
+// where specific partition labels may not exist on all hardware configurations.
 // Used when the node booted into full Talos (not maintenance) and
 // the maintenance API is not available.
 func WipeEFIPartitionAuthenticated(ctx context.Context, ip string, machineConfigYAML []byte) error {
@@ -142,17 +145,16 @@ func WipeEFIPartitionAuthenticated(ctx context.Context, ip string, machineConfig
 	defer conn.Close() //nolint:errcheck
 
 	client := machinepb.NewMachineServiceClient(conn)
+	// Empty SystemPartitionsToWipe + Mode=SYSTEM_DISK = wipe all system partitions.
+	// This avoids Talos v1.12 "VolumeStatuses doesn't exist" errors when specific
+	// partition labels (EFI, BIOS) don't exist on the hardware.
 	_, err = client.Reset(wipeCtx, &machinepb.ResetRequest{
 		Graceful: false,
 		Reboot:   true,
-		SystemPartitionsToWipe: []*machinepb.ResetPartitionSpec{
-			{Label: "EFI"},
-			{Label: "BIOS"},
-			{Label: "STATE"},
-		},
+		Mode:     machinepb.ResetRequest_SYSTEM_DISK,
 	})
 	if err != nil {
-		return fmt.Errorf("authenticated reset with EFI wipe on %s: %w", ip, err)
+		return fmt.Errorf("authenticated reset with system disk wipe on %s: %w", ip, err)
 	}
 	return nil
 }
