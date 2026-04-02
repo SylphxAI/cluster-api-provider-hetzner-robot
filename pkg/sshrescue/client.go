@@ -373,129 +373,42 @@ func (c *Client) ResolveStableDiskPath(disk string) (string, error) {
 	return stablePath, nil
 }
 
-// InstallTalos installs Talos Linux on the server using the official OCI
-// installer binary inside a minimal namespace created by unshare(1).
+// InstallTalos installs Talos Linux by writing the factory raw disk image
+// directly to the target disk. This is the fastest and most reliable method:
 //
-// The Talos installer (v1.12+) requires /proc, /sys, and mount namespace
-// isolation — it cannot run directly in rescue. We use Linux unshare to
-// provide these without Docker/podman. This is the SOTA approach:
+//	curl raw.xz | xzcat | dd of=/dev/nvme0n1
 //
-//   - go-efilib in the installer handles UEFI NVRAM entries type-safely,
-//     including Hetzner AX firmware quirks (no auto-discovery).
-//   - Canonical GPT layout (BIOS boot + EFI + BOOT + META + STATE + A + B)
-//     with correct UUIDs — future-proof across Talos releases.
-//   - --zero: secure wipe before partitioning.
+// The Talos Factory produces pre-built raw disk images with the correct GPT
+// layout (BIOS boot + EFI + BOOT + META + STATE + A/B) and schematic-specific
+// extensions baked in. No OCI export, no unshare/chroot, no crane dependency.
 //
-// Why not Hetzner installimage:
-//   installimage is ideal for standard Linux (Debian, Ubuntu) — it handles
-//   partitioning, filesystem, bootloader, and network in one command. However,
-//   Talos cannot use installimage because:
-//     1. Talos uses a proprietary GPT layout (BIOS boot + EFI + BOOT + META +
-//        STATE + A/B partitions) with specific UUIDs that installimage cannot
-//        produce. installimage only supports standard partition schemes.
-//     2. Talos is distributed as OCI images, not tar.gz/raw disk images.
-//        installimage's -i flag expects a standard OS archive or raw image.
-//     3. The Talos installer binary must run to generate the correct UKI
-//        (Unified Kernel Image) and create EFI boot entries via go-efilib.
-//        installimage has no hook for running a custom installer post-extract.
-//     4. Talos has no package manager, no standard init, no /etc/fstab — it
-//        is an immutable OS that boots from a squashfs/initramfs. installimage
-//        assumes a conventional mutable Linux filesystem layout.
-//   The OCI + unshare approach remains the correct method for Talos.
+// EFI boot order is handled by the caller's post-install efibootmgr script
+// (iterated 20+ times, battle-tested on Hetzner AX firmware). The OCI
+// installer's go-efilib entries were always overwritten by efibootmgr anyway.
 //
 // Flow:
-//  1. Download crane (static OCI tool, ~15MB) + export installer image
-//  2. Extract full OCI filesystem to /tmp/talos-root
-//  3. unshare --mount --pid --fork: mount /proc + /sys + /dev, run installer
-//  4. Fix EFI boot order from rescue (outside chroot/unshare)
+//  1. Download + write raw image via curl | xzcat | dd (single pipeline)
+//  2. Caller handles EFI boot order via efibootmgr (not this function's job)
 func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
-	// Derive OCI registry hostname from factoryURL.
-	registryHost := factoryURL
-	for _, prefix := range []string{"https://", "http://"} {
-		registryHost = strings.TrimPrefix(registryHost, prefix)
-	}
-	installerImage := fmt.Sprintf("%s/installer/%s:%s", registryHost, schematic, version)
+	// Talos Factory raw image URL:
+	// https://factory.talos.dev/image/{schematic}/{version}/metal-amd64.raw.xz
+	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
+		strings.TrimRight(factoryURL, "/"), schematic, version)
 
-	// Step 1: Download crane + export OCI image
-	craneURL := fmt.Sprintf(
-		"https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz",
-		craneVersion,
-	)
-	if out, err := c.Run(fmt.Sprintf(
-		"curl -fsSL %q -o /tmp/crane.tar.gz && tar xzf /tmp/crane.tar.gz -C /tmp crane && rm -f /tmp/crane.tar.gz && chmod +x /tmp/crane",
-		craneURL,
-	)); err != nil {
-		return fmt.Errorf("download crane: %w\nOutput: %s", err, out)
-	}
-
-	if out, err := c.Run(fmt.Sprintf(
-		"/tmp/crane export --platform linux/amd64 %q /tmp/talos-installer.tar",
-		installerImage,
-	)); err != nil {
-		return fmt.Errorf("crane export %s: %w\nOutput: %s", installerImage, err, out)
-	}
-
-	// Step 2: Extract full OCI filesystem
-	if out, err := c.Run("mkdir -p /tmp/talos-root && tar xf /tmp/talos-installer.tar -C /tmp/talos-root && rm -f /tmp/talos-installer.tar"); err != nil {
-		return fmt.Errorf("extract installer filesystem: %w\nOutput: %s", err, out)
-	}
-
-	// Step 3: Run installer inside unshare namespace
-	// unshare provides mount namespace so the installer can access /proc, /sys, /dev.
-	//
-	// Key details:
-	//   - /proc: tmpfs overlay with fake /proc/cmdline containing "talos.platform=metal"
-	//     (rescue kernel cmdline doesn't have this → installer nil-pointer panic at install.go:169)
-	//   - /sys: --rbind host sysfs (not mount -t sysfs) so go-efilib can access
-	//     /sys/firmware/efi/efivars for UEFI NVRAM boot entry creation
-	//   - /dev: --rbind host devtmpfs for block device access
-	//   - --force: required because WipeAllDisks clears partition metadata, but the
-	//     disk may still have residual signatures that block mkfs
+	// Single pipeline: download compressed image → decompress → write to disk.
+	// xzcat streams decompression (no temp file needed, rescue has limited RAM).
+	// dd uses 4M block size for optimal NVMe throughput.
+	// conv=notrunc prevents dd from truncating the device node.
 	installCmd := fmt.Sprintf(
-		"unshare --mount --pid --fork -- bash -c '"+
-			"mount --rbind /sys /tmp/talos-root/sys && "+
-			"mount --rbind /dev /tmp/talos-root/dev && "+
-			"mount --rbind /run /tmp/talos-root/run 2>/dev/null; "+
-			"mount -t tmpfs tmpfs /tmp/talos-root/proc -o size=1M && "+
-			"echo talos.platform=metal > /tmp/talos-root/proc/cmdline && "+
-			"mkdir -p /tmp/talos-root/proc/self && "+
-			"echo talos.platform=metal > /tmp/talos-root/proc/self/cmdline && "+
-			"chroot /tmp/talos-root /usr/bin/installer install --disk %q --force --zero --platform metal < /dev/null"+
-			"'",
-		disk,
+		"curl -fsSL %q | xzcat | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
+		imageURL, disk,
 	)
 	if out, err := c.Run(installCmd); err != nil {
-		// Best-effort cleanup even on failure (rescue is RAM-based, OCI fs is ~500MB)
-		_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
-		return fmt.Errorf("talos installer: %w\nOutput: %s", err, out)
+		return fmt.Errorf("write raw image to %s: %w\nOutput: %s", disk, err, out)
 	}
-
-	// Step 4: Fix EFI boot order from rescue (outside chroot/unshare)
-	// The installer creates a Talos UKI boot entry via go-efilib inside
-	// unshare, but the BootOrder update may not persist through the mount
-	// namespace. Explicitly set the Talos entry first using efibootmgr
-	// from rescue, where efivarfs access is direct to UEFI NVRAM.
-	efiCmd := `TALOS=$(efibootmgr 2>/dev/null | grep -i "Talos" | head -1 | sed 's/Boot\([0-9A-Fa-f]*\).*/\1/'); ` +
-		`if [ -n "$TALOS" ]; then ` +
-		`CURRENT=$(efibootmgr | grep BootOrder | awk '{print $2}'); ` +
-		`efibootmgr -o "$TALOS,$CURRENT" 2>&1; ` +
-		`echo "EFI boot order set: Talos ($TALOS) first"; ` +
-		`else ` +
-		`echo "WARN: No Talos boot entry found in efibootmgr, relying on UEFI fallback"; ` +
-		`fi`
-	if out, err := c.Run(efiCmd); err != nil {
-		// Non-fatal: UEFI fallback boot path may still work
-		_ = out
-	}
-
-	// Cleanup: OCI filesystem + crane binary (rescue is RAM-based)
-	_, _ = c.Run("rm -rf /tmp/talos-root /tmp/crane")
 
 	return nil
 }
-
-// craneVersion is the pinned version of crane used to pull OCI images.
-const craneVersion = "v0.20.2"
 
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
 // Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.

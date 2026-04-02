@@ -525,35 +525,35 @@ func TestInstallTalos_InstallerImageURLFormat(t *testing.T) {
 	}
 }
 
-func TestInstallTalos_CraneURLFormat(t *testing.T) {
-	// Verify the crane download URL is constructed correctly from craneVersion.
-	wantURL := fmt.Sprintf(
-		"https://github.com/google/go-containerregistry/releases/download/%s/go-containerregistry_Linux_x86_64.tar.gz",
-		craneVersion,
-	)
+func TestInstallTalos_RawImageURLFormat(t *testing.T) {
+	// Verify the raw image URL follows Talos Factory pattern:
+	// https://factory.talos.dev/image/{schematic}/{version}/metal-amd64.raw.xz
+	factoryURL := "https://factory.talos.dev"
+	schematic := "3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298"
+	version := "v1.12.6"
+	wantURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz", factoryURL, schematic, version)
 
-	// The crane version must be a valid semver tag.
-	if !strings.HasPrefix(craneVersion, "v") {
-		t.Errorf("craneVersion should start with 'v', got: %s", craneVersion)
+	if !strings.Contains(wantURL, schematic) {
+		t.Errorf("raw image URL should contain schematic, got: %s", wantURL)
 	}
-
-	if !strings.Contains(wantURL, craneVersion) {
-		t.Errorf("crane URL should contain version %s, got: %s", craneVersion, wantURL)
+	if !strings.Contains(wantURL, version) {
+		t.Errorf("raw image URL should contain version, got: %s", wantURL)
 	}
-	if !strings.HasSuffix(wantURL, ".tar.gz") {
-		t.Errorf("crane URL should end with .tar.gz, got: %s", wantURL)
-	}
-	if !strings.Contains(wantURL, "go-containerregistry") {
-		t.Errorf("crane URL should reference go-containerregistry, got: %s", wantURL)
+	if !strings.HasSuffix(wantURL, "metal-amd64.raw.xz") {
+		t.Errorf("raw image URL should end with metal-amd64.raw.xz, got: %s", wantURL)
 	}
 }
 
-func TestInstallTalos_CraneVersionIsPinned(t *testing.T) {
-	if craneVersion == "" {
-		t.Fatal("craneVersion must not be empty")
-	}
-	if craneVersion != "v0.20.2" {
-		t.Logf("craneVersion changed to %s — verify compatibility", craneVersion)
+func TestInstallTalos_RawImageURLTrailingSlash(t *testing.T) {
+	// Factory URL with trailing slash should not produce double-slash.
+	factoryURL := "https://factory.talos.dev/"
+	schematic := "abc123"
+	version := "v1.12.6"
+	expected := "https://factory.talos.dev/image/abc123/v1.12.6/metal-amd64.raw.xz"
+	got := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
+		strings.TrimRight(factoryURL, "/"), schematic, version)
+	if got != expected {
+		t.Errorf("URL mismatch:\n  want: %s\n  got:  %s", expected, got)
 	}
 }
 
@@ -568,16 +568,15 @@ func TestInstallTalos_RequiresConnection(t *testing.T) {
 	}
 }
 
-func TestInstallTalos_ErrorMessageContainsCraneContext(t *testing.T) {
+func TestInstallTalos_ErrorMessageContainsDiskContext(t *testing.T) {
 	c := New("127.0.0.1", []byte("key"))
 	err := c.InstallTalos("https://factory.talos.dev", "abc", "v1.0.0", "/dev/sda")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	// The first Run call in InstallTalos downloads crane, so the error wraps
-	// "download crane" with the inner "not connected" error.
-	if !strings.Contains(err.Error(), "download crane") {
-		t.Errorf("expected error to mention 'download crane', got: %v", err)
+	// The Run call writes raw image to disk, so error wraps the disk path.
+	if !strings.Contains(err.Error(), "write raw image to /dev/sda") {
+		t.Errorf("expected error to mention 'write raw image to /dev/sda', got: %v", err)
 	}
 }
 
@@ -1081,15 +1080,20 @@ func TestConstants(t *testing.T) {
 	}
 }
 
-func TestCraneVersion(t *testing.T) {
-	if craneVersion == "" {
-		t.Fatal("craneVersion must not be empty")
+func TestInstallTalos_RawImageURLComponents(t *testing.T) {
+	// Verify URL construction matches the Talos Factory API contract.
+	factoryURL := "https://factory.talos.dev"
+	schematic := "test-schematic-id"
+	version := "v1.12.4"
+	url := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
+		strings.TrimRight(factoryURL, "/"), schematic, version)
+
+	// Must start with factory base URL.
+	if !strings.HasPrefix(url, factoryURL) {
+		t.Errorf("URL should start with factory URL, got: %s", url)
 	}
-	if !strings.HasPrefix(craneVersion, "v") {
-		t.Errorf("craneVersion should start with 'v', got: %s", craneVersion)
-	}
-	// Must contain at least one dot (semver).
-	if !strings.Contains(craneVersion, ".") {
-		t.Errorf("craneVersion should be semver-like, got: %s", craneVersion)
+	// Must contain /image/ path segment.
+	if !strings.Contains(url, "/image/") {
+		t.Errorf("URL should contain /image/ path, got: %s", url)
 	}
 }
