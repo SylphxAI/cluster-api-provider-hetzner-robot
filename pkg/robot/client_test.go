@@ -608,6 +608,129 @@ func TestBasicAuth_AllMethods(t *testing.T) {
 	}
 }
 
+// --- DeactivateRescue edge cases ---
+
+func TestDeactivateRescue_Forbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":{"status":403,"code":"FORBIDDEN","message":"Insufficient permissions"}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL)
+	err := c.DeactivateRescue(context.Background(), 789)
+	if err == nil {
+		t.Fatal("expected error for 403 Forbidden, got nil")
+	}
+	if !contains(err.Error(), "403") {
+		t.Errorf("error = %q, want it to contain status code 403", err.Error())
+	}
+}
+
+func TestDeactivateRescue_InternalServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`internal server error`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL)
+	err := c.DeactivateRescue(context.Background(), 789)
+	if err == nil {
+		t.Fatal("expected error for 500 Internal Server Error, got nil")
+	}
+	if !contains(err.Error(), "500") {
+		t.Errorf("error = %q, want it to contain status code 500", err.Error())
+	}
+}
+
+func TestDeactivateRescue_ContextCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := c.DeactivateRescue(ctx, 789)
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// --- SetServerName edge cases ---
+
+func TestSetServerName_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"status":404,"code":"SERVER_NOT_FOUND","message":"Server not found"}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL)
+	err := c.SetServerName(context.Background(), 999, "new-name")
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+	if !contains(err.Error(), "404") {
+		t.Errorf("error = %q, want it to contain status code 404", err.Error())
+	}
+}
+
+// --- GetServer with IPv6 ---
+
+func TestGetServer_WithIPv6Net(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertBasicAuth(t, r)
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		if r.URL.Path != "/server/456" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"server": map[string]any{
+				"server_number":  456,
+				"server_name":    "ipv6-server",
+				"server_ip":      "138.199.242.217",
+				"server_ipv6_net": "2a01:4f8:271:3b49::/64",
+				"product":        "AX102",
+				"dc":             "FSN1-DC14",
+				"status":         "ready",
+				"cancelled":      false,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL)
+	info, err := c.GetServer(context.Background(), 456)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.ServerNumber != 456 {
+		t.Errorf("ServerNumber = %d, want 456", info.ServerNumber)
+	}
+	if info.ServerIP != "138.199.242.217" {
+		t.Errorf("ServerIP = %q, want %q", info.ServerIP, "138.199.242.217")
+	}
+	if info.ServerIPv6Net != "2a01:4f8:271:3b49::/64" {
+		t.Errorf("ServerIPv6Net = %q, want %q", info.ServerIPv6Net, "2a01:4f8:271:3b49::/64")
+	}
+	if info.ServerName != "ipv6-server" {
+		t.Errorf("ServerName = %q, want %q", info.ServerName, "ipv6-server")
+	}
+	if info.Product != "AX102" {
+		t.Errorf("Product = %q, want %q", info.Product, "AX102")
+	}
+}
+
 // --- helpers ---
 
 // contains reports whether s contains substr (avoids importing strings in test).

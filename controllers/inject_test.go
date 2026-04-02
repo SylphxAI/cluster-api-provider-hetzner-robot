@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -795,5 +796,473 @@ func TestInjectProviderID_PreservesExistingKubeletConfig(t *testing.T) {
 	}
 	if extraArgs["provider-id"] != "hetzner-robot://123" {
 		t.Errorf("provider-id should be injected, got %v", extraArgs["provider-id"])
+	}
+}
+
+// ─── injectInstallDisk edge cases ──────────────────────────────────────────
+
+func TestInjectInstallDisk_ExistingDiskPreserved(t *testing.T) {
+	// When config already has a disk set, injectInstallDisk must NOT override it.
+	// This verifies the exact preserved value (not just "not the default").
+	input := []byte(`machine:
+  install:
+    disk: /dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNE0W405037
+`)
+	result, err := injectInstallDisk(input, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("injectInstallDisk failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	install := machine["install"].(map[string]interface{})
+	want := "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNE0W405037"
+	if install["disk"] != want {
+		t.Errorf("existing disk should be preserved: got %v, want %v", install["disk"], want)
+	}
+}
+
+func TestInjectInstallDisk_EmptyParamDefaultsToNvme(t *testing.T) {
+	// When installDisk param is empty string, the function should default to /dev/nvme0n1.
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectInstallDisk(input, "")
+	if err != nil {
+		t.Fatalf("injectInstallDisk failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	install := machine["install"].(map[string]interface{})
+	if install["disk"] != "/dev/nvme0n1" {
+		t.Errorf("empty installDisk param should default to /dev/nvme0n1, got %v", install["disk"])
+	}
+}
+
+func TestInjectInstallDisk_MultiDocOnlyFirstModified(t *testing.T) {
+	// In multi-document YAML, only the first document should get the disk injected.
+	// Subsequent documents must remain untouched.
+	input := []byte(`machine:
+  type: controlplane
+---
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+`)
+	result, err := injectInstallDisk(input, "/dev/sda")
+	if err != nil {
+		t.Fatalf("injectInstallDisk failed: %v", err)
+	}
+
+	resultStr := string(result)
+	// First doc should have the install disk
+	if !strings.Contains(resultStr, "disk: /dev/sda") {
+		t.Error("expected install disk in first document")
+	}
+	// Second doc must survive intact
+	if !strings.Contains(resultStr, "kind: VolumeConfig") {
+		t.Error("VolumeConfig document was dropped")
+	}
+	if !strings.Contains(resultStr, "name: EPHEMERAL") {
+		t.Error("VolumeConfig name was dropped")
+	}
+
+	// Verify the second document does NOT have an install disk —
+	// split on separator and check the second part
+	parts := strings.SplitN(resultStr, "---", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 document parts, got %d", len(parts))
+	}
+	if strings.Contains(parts[1], "disk:") {
+		t.Error("disk should NOT appear in the second document")
+	}
+}
+
+// ─── injectHostname edge cases ─────────────────────────────────────────────
+
+func TestInjectHostname_ServerIDZero_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectHostname(input, "fsn1", 0, "compute")
+	if err != nil {
+		t.Fatalf("injectHostname failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("serverID=0 should return input unchanged")
+	}
+}
+
+func TestInjectHostname_EmptyDC_DefaultsFSN1(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectHostname(input, "", 12345, "compute")
+	if err != nil {
+		t.Fatalf("injectHostname failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	hostname := network["hostname"].(string)
+	if hostname != "compute-fsn1-12345" {
+		t.Errorf("expected compute-fsn1-12345, got %s", hostname)
+	}
+}
+
+func TestInjectHostname_StorageRole(t *testing.T) {
+	input := []byte(`machine:
+  type: worker
+`)
+	result, err := injectHostname(input, "hel1", 99999, "storage")
+	if err != nil {
+		t.Fatalf("injectHostname failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	hostname := network["hostname"].(string)
+	if hostname != "storage-hel1-99999" {
+		t.Errorf("expected storage-hel1-99999, got %s", hostname)
+	}
+}
+
+func TestInjectHostname_ControlPlaneRole_DefaultsCompute(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectHostname(input, "nbg1", 55555, "control-plane")
+	if err != nil {
+		t.Fatalf("injectHostname failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	hostname := network["hostname"].(string)
+	if hostname != "compute-nbg1-55555" {
+		t.Errorf("expected compute-nbg1-55555, got %s", hostname)
+	}
+}
+
+func TestInjectHostname_EmptyRole_DefaultsCompute(t *testing.T) {
+	input := []byte(`machine:
+  type: worker
+`)
+	result, err := injectHostname(input, "fsn1", 77777, "")
+	if err != nil {
+		t.Fatalf("injectHostname failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	hostname := network["hostname"].(string)
+	if hostname != "compute-fsn1-77777" {
+		t.Errorf("expected compute-fsn1-77777, got %s", hostname)
+	}
+}
+
+// ─── injectVLANConfig edge cases ───────────────────────────────────────────
+
+func TestInjectVLANConfig_NilConfig_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: worker
+  network:
+    hostname: test-node
+`)
+	result, err := injectVLANConfig(input, nil, "10.10.0.5", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("nil vlanCfg should return input unchanged")
+	}
+}
+
+func TestInjectVLANConfig_EmptyInternalIP_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: worker
+  network:
+    hostname: test-node
+`)
+	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0", PrefixLength: 24}
+	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty internalIP should return input unchanged")
+	}
+}
+
+func TestInjectVLANConfig_MergeExistingInterfaceWithMAC(t *testing.T) {
+	// Existing interface matched by deviceSelector MAC with extra settings.
+	// After merge: original mtu preserved, VLAN added, static routing configured.
+	input := []byte(`machine:
+  network:
+    interfaces:
+      - deviceSelector:
+          hardwareAddr: "11:22:33:44:55:66"
+        mtu: 1500
+        addresses:
+          - 10.0.0.1/24
+`)
+	vlanCfg := &infrav1.VLANConfig{
+		ID:           4001,
+		Interface:    "eth0",
+		PrefixLength: 28,
+	}
+
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.10", "11:22:33:44:55:66", "5.6.7.8", "5.6.7.1")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+
+	// Should still be 1 interface (merged, not duplicated)
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	}
+
+	iface := interfaces[0].(map[string]interface{})
+	// MTU preserved from original
+	if iface["mtu"] != 1500 {
+		t.Errorf("expected mtu 1500 preserved, got %v", iface["mtu"])
+	}
+	// Static /32 address replaces the old addresses
+	parentAddrs := iface["addresses"].([]interface{})
+	if len(parentAddrs) != 1 || parentAddrs[0] != "5.6.7.8/32" {
+		t.Errorf("expected parent address 5.6.7.8/32, got %v", parentAddrs)
+	}
+	// VLAN with correct prefix
+	vlans := iface["vlans"].([]interface{})
+	if len(vlans) != 1 {
+		t.Fatalf("expected 1 vlan, got %d", len(vlans))
+	}
+	vlan := vlans[0].(map[string]interface{})
+	addresses := vlan["addresses"].([]interface{})
+	if addresses[0] != "10.10.0.10/28" {
+		t.Errorf("expected 10.10.0.10/28, got %v", addresses[0])
+	}
+}
+
+func TestInjectVLANConfig_PrefixLengthZero_DefaultsTo24(t *testing.T) {
+	input := []byte(`machine: {}`)
+	vlanCfg := &infrav1.VLANConfig{
+		ID:           4000,
+		Interface:    "eth0",
+		PrefixLength: 0, // explicitly zero
+	}
+
+	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.99", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")
+	if err != nil {
+		t.Fatalf("injectVLANConfig failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+	iface := interfaces[0].(map[string]interface{})
+	vlans := iface["vlans"].([]interface{})
+	vlan := vlans[0].(map[string]interface{})
+	addresses := vlan["addresses"].([]interface{})
+	if addresses[0] != "10.10.0.99/24" {
+		t.Errorf("PrefixLength=0 should default to /24, got %v", addresses[0])
+	}
+}
+
+// ─── injectIPv6Config edge cases ───────────────────────────────────────────
+
+func TestInjectIPv6Config_EmptyIPv6Net_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty ipv6Net should return input unchanged")
+	}
+}
+
+func TestInjectIPv6Config_EmptyPrimaryMAC_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "", "10.10.0.1")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("empty primaryMAC should return input unchanged")
+	}
+}
+
+func TestInjectIPv6Config_TrailingDoubleColon(t *testing.T) {
+	// IPv6 prefix with trailing "::" (most common from Hetzner API)
+	// Should build "2a01:4f8:271:3b49::1/64"
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+	iface := interfaces[0].(map[string]interface{})
+	addrs := iface["addresses"].([]interface{})
+	if addrs[0] != "2a01:4f8:271:3b49::1/64" {
+		t.Errorf("expected 2a01:4f8:271:3b49::1/64, got %v", addrs[0])
+	}
+}
+
+func TestInjectIPv6Config_WithSlash64Suffix(t *testing.T) {
+	// IPv6 prefix with "/64" suffix — the function should strip the prefix length before building the address.
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:2210:1a2e::/64", "aa:bb:cc:dd:ee:ff", "10.10.0.1")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+	iface := interfaces[0].(map[string]interface{})
+	addrs := iface["addresses"].([]interface{})
+	// Must be ::1/64 — not ::/64::1/64 or other malformed address
+	if addrs[0] != "2a01:4f8:2210:1a2e::1/64" {
+		t.Errorf("expected 2a01:4f8:2210:1a2e::1/64, got %v", addrs[0])
+	}
+}
+
+func TestInjectIPv6Config_WithInternalIP_DualStackNodeIP(t *testing.T) {
+	// When internalIP is provided, kubelet should get dual-stack node-ip: "IPv4,IPv6"
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "10.10.0.5")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	kubelet := machine["kubelet"].(map[string]interface{})
+	extraArgs := kubelet["extraArgs"].(map[string]interface{})
+	nodeIP := extraArgs["node-ip"].(string)
+	if nodeIP != "10.10.0.5,2a01:4f8:271:3b49::1" {
+		t.Errorf("expected dual-stack node-ip '10.10.0.5,2a01:4f8:271:3b49::1', got %q", nodeIP)
+	}
+}
+
+func TestInjectIPv6Config_WithoutInternalIP_IPv6OnlyNodeIP(t *testing.T) {
+	// When internalIP is empty, kubelet should get IPv6-only node-ip
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	kubelet := machine["kubelet"].(map[string]interface{})
+	extraArgs := kubelet["extraArgs"].(map[string]interface{})
+	nodeIP := extraArgs["node-ip"].(string)
+	if nodeIP != "2a01:4f8:271:3b49::1" {
+		t.Errorf("expected IPv6-only node-ip '2a01:4f8:271:3b49::1', got %q", nodeIP)
+	}
+}
+
+// ─── modifyFirstDocument edge cases ────────────────────────────────────────
+
+func TestModifyFirstDocument_FnReturnsError(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	_, err := modifyFirstDocument(input, func(config map[string]interface{}) error {
+		return fmt.Errorf("injected failure")
+	})
+	if err == nil {
+		t.Fatal("expected error from fn to be propagated, got nil")
+	}
+	if !strings.Contains(err.Error(), "injected failure") {
+		t.Errorf("expected error to contain 'injected failure', got %q", err.Error())
+	}
+}
+
+func TestModifyFirstDocument_InvalidYAML(t *testing.T) {
+	input := []byte(`{{{invalid yaml not valid at all`)
+	_, err := modifyFirstDocument(input, func(config map[string]interface{}) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid YAML, got nil")
 	}
 }
