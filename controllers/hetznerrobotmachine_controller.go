@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -812,6 +813,63 @@ func (r *HetznerRobotMachineReconciler) stateWaitTalosMaintenanceMode(
 	return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 }
 
+// modifyFirstDocument parses multi-document YAML, applies fn to the first
+// document (the v1alpha1 machineconfig), and preserves all subsequent
+// documents (VolumeConfig, RawVolumeConfig, etc.) unchanged.
+func modifyFirstDocument(configData []byte, fn func(config map[string]interface{}) error) ([]byte, error) {
+	docs := splitYAMLDocuments(configData)
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("empty machineconfig")
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(docs[0], &config); err != nil {
+		return nil, fmt.Errorf("unmarshal first document: %w", err)
+	}
+
+	if err := fn(config); err != nil {
+		return nil, err
+	}
+
+	firstDoc, err := yaml.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("marshal first document: %w", err)
+	}
+
+	result := firstDoc
+	for _, doc := range docs[1:] {
+		result = append(result, []byte("\n---\n")...)
+		result = append(result, doc...)
+	}
+
+	return result, nil
+}
+
+// splitYAMLDocuments splits multi-document YAML by "---" separators,
+// returning each document as a trimmed byte slice.
+func splitYAMLDocuments(data []byte) [][]byte {
+	parts := bytes.Split(data, []byte("\n---\n"))
+	var docs [][]byte
+	for _, p := range parts {
+		p = bytes.TrimSpace(p)
+		if len(p) > 0 && !bytes.Equal(p, []byte("---")) {
+			p = bytes.TrimPrefix(p, []byte("---\n"))
+			docs = append(docs, p)
+		}
+	}
+	return docs
+}
+
+// ensureMap returns the child map at key, creating it if absent.
+func ensureMap(parent map[string]interface{}, key string) map[string]interface{} {
+	if m, ok := parent[key].(map[string]interface{}); ok {
+		return m
+	}
+	m := make(map[string]interface{})
+	parent[key] = m
+	return m
+}
+
 // injectInstallDisk ensures machine.install.disk is set in the Talos machineconfig YAML.
 // CAPT generates configs without install disk — CAPHR must inject it from the HRM spec
 // before applying, otherwise Talos rejects the config with "install disk or diskSelector should be defined".
@@ -819,62 +877,14 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 	if installDisk == "" {
 		installDisk = "/dev/nvme0n1"
 	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig: %w", err)
-	}
-
-	// Ensure machine.install.disk exists
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	install, ok := machine["install"].(map[string]interface{})
-	if !ok {
-		install = make(map[string]interface{})
-		machine["install"] = install
-	}
-
-	// Only set if not already defined (don't override explicit config)
-	if _, exists := install["disk"]; !exists {
-		install["disk"] = installDisk
-	}
-
-	return yaml.Marshal(config)
-}
-
-// injectCiliumStartupTaint adds node.cilium.io/agent-not-ready taint to kubelet config.
-// Cilium removes this taint automatically once initialized. Prevents pod scheduling
-// failures during the 1-2 min Cilium warmup on new nodes.
-func injectCiliumStartupTaint(configData []byte) ([]byte, error) {
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, err
-	}
-
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	kubelet, ok := machine["kubelet"].(map[string]interface{})
-	if !ok {
-		kubelet = make(map[string]interface{})
-		machine["kubelet"] = kubelet
-	}
-
-	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
-	if !ok {
-		extraArgs = make(map[string]interface{})
-		kubelet["extraArgs"] = extraArgs
-	}
-
-	extraArgs["register-with-taints"] = "node.cilium.io/agent-not-ready=true:NoSchedule"
-	return yaml.Marshal(config)
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		install := ensureMap(machine, "install")
+		if _, exists := install["disk"]; !exists {
+			install["disk"] = installDisk
+		}
+		return nil
+	})
 }
 
 // injectIPv6Config adds a global IPv6 address and default route to the primary NIC.
@@ -886,101 +896,77 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		return configData, nil
 	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for IPv6 injection: %w", err)
-	}
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		network := ensureMap(machine, "network")
 
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
+		// ipv6Net from Hetzner API may include prefix length (e.g. "2a01:4f8:271:3b49::/64").
+		// Strip it before constructing the host address.
+		ipv6Prefix := strings.Split(ipv6Net, "/")[0] // "2a01:4f8:271:3b49::"
+		ipv6Addr := ipv6Prefix + "1/64"              // "2a01:4f8:271:3b49::1/64"
 
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
-
-	// ipv6Net from Hetzner API may include prefix length (e.g. "2a01:4f8:271:3b49::/64").
-	// Strip it before constructing the host address.
-	ipv6Prefix := strings.Split(ipv6Net, "/")[0] // "2a01:4f8:271:3b49::"
-	ipv6Addr := ipv6Prefix + "1/64"              // "2a01:4f8:271:3b49::1/64"
-
-	// Find existing interface by deviceSelector MAC or create new
-	interfaces, _ := network["interfaces"].([]interface{})
-	found := false
-	for _, iface := range interfaces {
-		ifMap, ok := iface.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		// Match by deviceSelector.hardwareAddr or by legacy interface name
-		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-			addrs, _ := ifMap["addresses"].([]interface{})
-			addrs = append(addrs, ipv6Addr)
-			ifMap["addresses"] = addrs
-			routes, _ := ifMap["routes"].([]interface{})
-			routes = append(routes, map[string]interface{}{
-				"network": "::/0",
-				"gateway": "fe80::1",
-			})
-			ifMap["routes"] = routes
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		newIface := map[string]interface{}{
-			"deviceSelector": map[string]interface{}{
-				"hardwareAddr": primaryMAC, "physical": true,
-			},
-			"addresses": []interface{}{ipv6Addr},
-			"routes": []interface{}{
-				map[string]interface{}{
+		// Find existing interface by deviceSelector MAC or create new
+		interfaces, _ := network["interfaces"].([]interface{})
+		found := false
+		for _, iface := range interfaces {
+			ifMap, ok := iface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// Match by deviceSelector.hardwareAddr or by legacy interface name
+			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
+			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
+				addrs, _ := ifMap["addresses"].([]interface{})
+				addrs = append(addrs, ipv6Addr)
+				ifMap["addresses"] = addrs
+				routes, _ := ifMap["routes"].([]interface{})
+				routes = append(routes, map[string]interface{}{
 					"network": "::/0",
 					"gateway": "fe80::1",
-				},
-			},
+				})
+				ifMap["routes"] = routes
+				found = true
+				break
+			}
 		}
-		interfaces = append(interfaces, newIface)
-		network["interfaces"] = interfaces
-	}
 
-	// Set IPv6 forwarding sysctl (required for pod routing)
-	sysctls, ok := machine["sysctls"].(map[string]interface{})
-	if !ok {
-		sysctls = make(map[string]interface{})
-		machine["sysctls"] = sysctls
-	}
-	sysctls["net.ipv6.conf.all.forwarding"] = "1"
+		if !found {
+			newIface := map[string]interface{}{
+				"deviceSelector": map[string]interface{}{
+					"hardwareAddr": primaryMAC, "physical": true,
+				},
+				"addresses": []interface{}{ipv6Addr},
+				"routes": []interface{}{
+					map[string]interface{}{
+						"network": "::/0",
+						"gateway": "fe80::1",
+					},
+				},
+			}
+			interfaces = append(interfaces, newIface)
+			network["interfaces"] = interfaces
+		}
 
-	// Set kubelet nodeIP for dual-stack: IPv4 (VLAN) + IPv6.
-	// Without this, kubelet only advertises the IPv4 address and K8s
-	// doesn't know the node has IPv6 connectivity.
-	kubelet, ok := machine["kubelet"].(map[string]interface{})
-	if !ok {
-		kubelet = make(map[string]interface{})
-		machine["kubelet"] = kubelet
-	}
-	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
-	if !ok {
-		extraArgs = make(map[string]interface{})
-		kubelet["extraArgs"] = extraArgs
-	}
-	// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
-	// Both are needed for K8s to advertise the node as dual-stack.
-	nodeIPv6 := strings.TrimSuffix(ipv6Prefix, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
-	if internalIP != "" {
-		extraArgs["node-ip"] = internalIP + "," + nodeIPv6
-	} else {
-		extraArgs["node-ip"] = nodeIPv6
-	}
+		// Set IPv6 forwarding sysctl (required for pod routing)
+		sysctls := ensureMap(machine, "sysctls")
+		sysctls["net.ipv6.conf.all.forwarding"] = "1"
 
-	return yaml.Marshal(config)
+		// Set kubelet nodeIP for dual-stack: IPv4 (VLAN) + IPv6.
+		// Without this, kubelet only advertises the IPv4 address and K8s
+		// doesn't know the node has IPv6 connectivity.
+		kubelet := ensureMap(machine, "kubelet")
+		extraArgs := ensureMap(kubelet, "extraArgs")
+		// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
+		// Both are needed for K8s to advertise the node as dual-stack.
+		nodeIPv6 := strings.TrimSuffix(ipv6Prefix, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
+		if internalIP != "" {
+			extraArgs["node-ip"] = internalIP + "," + nodeIPv6
+		} else {
+			extraArgs["node-ip"] = nodeIPv6
+		}
+
+		return nil
+	})
 }
 
 // injectHostname sets machine.network.hostname in the Talos machineconfig.
@@ -1007,25 +993,12 @@ func injectHostname(configData []byte, dc string, serverID int, hostRole string)
 	}
 	hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for hostname injection: %w", err)
-	}
-
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
-
-	network["hostname"] = hostname
-	return yaml.Marshal(config)
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		network := ensureMap(machine, "network")
+		network["hostname"] = hostname
+		return nil
+	})
 }
 
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig and configures
@@ -1048,91 +1021,79 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		prefixLen = 24
 	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal machineconfig for VLAN injection: %w", err)
-	}
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		network := ensureMap(machine, "network")
 
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
+		// Build the VLAN entry
+		vlanEntry := map[string]interface{}{
+			"vlanId": vlanCfg.ID,
+			"addresses": []interface{}{
+				fmt.Sprintf("%s/%d", internalIP, prefixLen),
+			},
+		}
 
-	network, ok := machine["network"].(map[string]interface{})
-	if !ok {
-		network = make(map[string]interface{})
-		machine["network"] = network
-	}
+		// Build static routes for the parent NIC.
+		// With a /32 address, the kernel has no on-link route for the gateway itself.
+		// The on-link route (gatewayIP/32 with no gateway field) tells the kernel the
+		// gateway is directly reachable on this interface. Without it, the default route
+		// fails with "network unreachable" because there's no path to the next hop.
+		parentRoutes := []interface{}{
+			map[string]interface{}{
+				"network": "0.0.0.0/0",
+				"gateway": gatewayIP,
+			},
+			map[string]interface{}{
+				"network": gatewayIP + "/32",
+			},
+		}
 
-	// Build the VLAN entry
-	vlanEntry := map[string]interface{}{
-		"vlanId": vlanCfg.ID,
-		"addresses": []interface{}{
-			fmt.Sprintf("%s/%d", internalIP, prefixLen),
-		},
-	}
+		// Build the interface entry with deviceSelector + static IP + routes + VLAN.
+		// No DHCP — static /32 avoids Hetzner's L2 isolation issue with /25 on-link routes.
+		ifaceEntry := map[string]interface{}{
+			"deviceSelector": map[string]interface{}{
+				"hardwareAddr": primaryMAC, "physical": true,
+			},
+			"addresses": []interface{}{serverIP + "/32"},
+			"routes":    parentRoutes,
+			"vlans":     []interface{}{vlanEntry},
+		}
 
-	// Build static routes for the parent NIC.
-	// With a /32 address, the kernel has no on-link route for the gateway itself.
-	// The on-link route (gatewayIP/32 with no gateway field) tells the kernel the
-	// gateway is directly reachable on this interface. Without it, the default route
-	// fails with "network unreachable" because there's no path to the next hop.
-	parentRoutes := []interface{}{
-		map[string]interface{}{
-			"network": "0.0.0.0/0",
-			"gateway": gatewayIP,
-		},
-		map[string]interface{}{
-			"network": gatewayIP + "/32",
-		},
-	}
-
-	// Build the interface entry with deviceSelector + static IP + routes + VLAN.
-	// No DHCP — static /32 avoids Hetzner's L2 isolation issue with /25 on-link routes.
-	ifaceEntry := map[string]interface{}{
-		"deviceSelector": map[string]interface{}{
-			"hardwareAddr": primaryMAC, "physical": true,
-		},
-		"addresses": []interface{}{serverIP + "/32"},
-		"routes":    parentRoutes,
-		"vlans":     []interface{}{vlanEntry},
-	}
-
-	// Find or create the interfaces list
-	interfaces, ok := network["interfaces"].([]interface{})
-	if !ok {
-		interfaces = []interface{}{}
-	}
-
-	// Check if an entry for this NIC already exists (by deviceSelector MAC) — merge VLAN into it
-	found := false
-	for i, iface := range interfaces {
-		ifMap, ok := iface.(map[string]interface{})
+		// Find or create the interfaces list
+		interfaces, ok := network["interfaces"].([]interface{})
 		if !ok {
-			continue
+			interfaces = []interface{}{}
 		}
-		selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-		if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-			// Set static IP config (replace any existing dhcp/addresses)
-			delete(ifMap, "dhcp")
-			ifMap["addresses"] = []interface{}{serverIP + "/32"}
-			ifMap["routes"] = parentRoutes
-			// Add VLAN to existing vlans list (or create new)
-			existingVlans, _ := ifMap["vlans"].([]interface{})
-			ifMap["vlans"] = append(existingVlans, vlanEntry)
-			interfaces[i] = ifMap
-			found = true
-			break
+
+		// Check if an entry for this NIC already exists (by deviceSelector MAC) — merge VLAN into it
+		found := false
+		for i, iface := range interfaces {
+			ifMap, ok := iface.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
+			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
+				// Set static IP config (replace any existing dhcp/addresses)
+				delete(ifMap, "dhcp")
+				ifMap["addresses"] = []interface{}{serverIP + "/32"}
+				ifMap["routes"] = parentRoutes
+				// Add VLAN to existing vlans list (or create new)
+				existingVlans, _ := ifMap["vlans"].([]interface{})
+				ifMap["vlans"] = append(existingVlans, vlanEntry)
+				interfaces[i] = ifMap
+				found = true
+				break
+			}
 		}
-	}
 
-	if !found {
-		interfaces = append(interfaces, ifaceEntry)
-	}
+		if !found {
+			interfaces = append(interfaces, ifaceEntry)
+		}
 
-	network["interfaces"] = interfaces
-	return yaml.Marshal(config)
+		network["interfaces"] = interfaces
+		return nil
+	})
 }
 
 // injectSecretboxEncryptionSecret replaces cluster.secretboxEncryptionSecret in the
@@ -1144,19 +1105,11 @@ func injectSecretboxEncryptionSecret(configData []byte, secret string) ([]byte, 
 		return configData, nil
 	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal config for secretbox injection: %w", err)
-	}
-
-	cluster, _ := config["cluster"].(map[string]interface{})
-	if cluster == nil {
-		cluster = make(map[string]interface{})
-		config["cluster"] = cluster
-	}
-
-	cluster["secretboxEncryptionSecret"] = secret
-	return yaml.Marshal(config)
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		cluster := ensureMap(config, "cluster")
+		cluster["secretboxEncryptionSecret"] = secret
+		return nil
+	})
 }
 
 // injectServiceAccountKey overrides cluster.serviceAccount.key in the Talos machineconfig.
@@ -1169,25 +1122,12 @@ func injectServiceAccountKey(configData []byte, saKey string) ([]byte, error) {
 		return configData, nil
 	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal config for SA key injection: %w", err)
-	}
-
-	cluster, _ := config["cluster"].(map[string]interface{})
-	if cluster == nil {
-		cluster = make(map[string]interface{})
-		config["cluster"] = cluster
-	}
-
-	sa, _ := cluster["serviceAccount"].(map[string]interface{})
-	if sa == nil {
-		sa = make(map[string]interface{})
-		cluster["serviceAccount"] = sa
-	}
-
-	sa["key"] = saKey
-	return yaml.Marshal(config)
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		cluster := ensureMap(config, "cluster")
+		sa := ensureMap(cluster, "serviceAccount")
+		sa["key"] = saKey
+		return nil
+	})
 }
 
 // injectProviderID sets machine.kubelet.extraArgs["provider-id"] in the Talos
@@ -1199,70 +1139,13 @@ func injectProviderID(configData []byte, providerID string) ([]byte, error) {
 		return configData, nil
 	}
 
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("unmarshal config for providerID injection: %w", err)
-	}
-
-	machine, ok := config["machine"].(map[string]interface{})
-	if !ok {
-		machine = make(map[string]interface{})
-		config["machine"] = machine
-	}
-
-	kubelet, ok := machine["kubelet"].(map[string]interface{})
-	if !ok {
-		kubelet = make(map[string]interface{})
-		machine["kubelet"] = kubelet
-	}
-
-	extraArgs, ok := kubelet["extraArgs"].(map[string]interface{})
-	if !ok {
-		extraArgs = make(map[string]interface{})
-		kubelet["extraArgs"] = extraArgs
-	}
-
-	extraArgs["provider-id"] = providerID
-	return yaml.Marshal(config)
-}
-
-// injectStorageVolumes appends VolumeConfig + RawVolumeConfig YAML documents to
-// the machineconfig when EphemeralSize is set. Uses Talos v1.12+ native volume
-// management instead of post-install sgdisk manipulation.
-//
-// VolumeConfig limits the EPHEMERAL partition to the specified maxSize.
-// RawVolumeConfig creates an "osd-data" raw partition with remaining space,
-// which appears at /dev/disk/by-partlabel/r-osd-data for Ceph OSD use.
-//
-// The volume name MUST NOT contain "ceph" — Ceph inventory rejects partitions
-// with "ceph" in PARTLABEL.
-func injectStorageVolumes(configData []byte, ephemeralSize string) ([]byte, error) {
-	if ephemeralSize == "" {
-		return configData, nil
-	}
-
-	volumeConfig := fmt.Sprintf(`---
-apiVersion: v1alpha1
-kind: VolumeConfig
-name: EPHEMERAL
-provisioning:
-  maxSize: %s
-`, ephemeralSize)
-
-	rawVolumeConfig := `---
-apiVersion: v1alpha1
-kind: RawVolumeConfig
-name: osd-data
-provisioning:
-  diskSelector:
-    match: system_disk
-  minSize: 50GB
-`
-
-	// Append the volume documents to the machineconfig as a multi-document YAML stream.
-	// Talos config apply accepts multi-doc YAML — each document is processed independently.
-	result := append(configData, []byte("\n"+volumeConfig+rawVolumeConfig)...)
-	return result, nil
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		kubelet := ensureMap(machine, "kubelet")
+		extraArgs := ensureMap(kubelet, "extraArgs")
+		extraArgs["provider-id"] = providerID
+		return nil
+	})
 }
 
 // stateApplyConfig applies the Talos machineconfig from the bootstrap secret.
@@ -1303,14 +1186,6 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("inject install disk into config: %w", err)
 	}
 	logger.Info("Injected install disk into machineconfig", "disk", installDisk)
-
-	// Inject Cilium startup taint: prevents workload scheduling until Cilium is ready.
-	// Cilium agent automatically removes this taint once it's initialized on the node.
-	// Without this, pods scheduled to a new node fail with "unable to create endpoint".
-	bootstrapData, err = injectCiliumStartupTaint(bootstrapData)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("inject Cilium startup taint: %w", err)
-	}
 
 	// Primary NIC MAC — detected during rescue install, stored in status
 	primaryMAC := hrm.Status.PrimaryMAC
@@ -1414,18 +1289,6 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 		return ctrl.Result{}, fmt.Errorf("inject providerID into config: %w", err)
 	}
 	logger.Info("Injected providerID into machineconfig", "providerID", providerID)
-
-	// Inject storage volume config if ephemeralSize is set.
-	// Appends VolumeConfig (limits EPHEMERAL) + RawVolumeConfig (creates raw OSD partition)
-	// as additional YAML documents. Talos v1.12+ processes these natively during boot.
-	if hrm.Spec.EphemeralSize != "" {
-		bootstrapData, err = injectStorageVolumes(bootstrapData, hrm.Spec.EphemeralSize)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("inject storage volumes config: %w", err)
-		}
-		logger.Info("Injected storage volume config into machineconfig",
-			"ephemeralSize", hrm.Spec.EphemeralSize)
-	}
 
 	logger.Info("Applying Talos machineconfig", "ip", serverIP)
 

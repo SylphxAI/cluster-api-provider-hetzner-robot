@@ -1,11 +1,241 @@
 package controllers
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 	"gopkg.in/yaml.v3"
 )
+
+// ─── modifyFirstDocument / splitYAMLDocuments ──────────────────────────────
+
+func TestModifyFirstDocument_SingleDoc(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := modifyFirstDocument(input, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		machine["hostname"] = "test-node"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("modifyFirstDocument failed: %v", err)
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	machine := config["machine"].(map[string]interface{})
+	if machine["hostname"] != "test-node" {
+		t.Errorf("expected hostname test-node, got %v", machine["hostname"])
+	}
+}
+
+func TestModifyFirstDocument_MultiDoc_PreservesSubsequent(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+cluster:
+  clusterName: test
+---
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+provisioning:
+  maxSize: 100GB
+---
+apiVersion: v1alpha1
+kind: RawVolumeConfig
+name: osd-data
+provisioning:
+  diskSelector:
+    match: system_disk
+`)
+	result, err := modifyFirstDocument(input, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		install := ensureMap(machine, "install")
+		install["disk"] = "/dev/nvme0n1"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("modifyFirstDocument failed: %v", err)
+	}
+
+	resultStr := string(result)
+
+	// First document should have the modification
+	if !strings.Contains(resultStr, "disk: /dev/nvme0n1") {
+		t.Error("expected install disk in first document")
+	}
+
+	// VolumeConfig document must survive
+	if !strings.Contains(resultStr, "kind: VolumeConfig") {
+		t.Error("VolumeConfig document was dropped")
+	}
+	if !strings.Contains(resultStr, "maxSize: 100GB") {
+		t.Error("VolumeConfig maxSize was dropped")
+	}
+
+	// RawVolumeConfig document must survive
+	if !strings.Contains(resultStr, "kind: RawVolumeConfig") {
+		t.Error("RawVolumeConfig document was dropped")
+	}
+	if !strings.Contains(resultStr, "name: osd-data") {
+		t.Error("RawVolumeConfig name was dropped")
+	}
+
+	// Documents should be separated by ---
+	if !strings.Contains(resultStr, "\n---\n") {
+		t.Error("expected YAML document separator between documents")
+	}
+}
+
+func TestModifyFirstDocument_Empty(t *testing.T) {
+	_, err := modifyFirstDocument([]byte(""), func(config map[string]interface{}) error {
+		return nil
+	})
+	if err == nil {
+		t.Error("expected error for empty input")
+	}
+}
+
+func TestSplitYAMLDocuments_Single(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	docs := splitYAMLDocuments(input)
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document, got %d", len(docs))
+	}
+}
+
+func TestSplitYAMLDocuments_Multi(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+---
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+---
+apiVersion: v1alpha1
+kind: RawVolumeConfig
+name: osd-data
+`)
+	docs := splitYAMLDocuments(input)
+	if len(docs) != 3 {
+		t.Fatalf("expected 3 documents, got %d", len(docs))
+	}
+	if !bytes.Contains(docs[0], []byte("controlplane")) {
+		t.Error("first doc should contain machineconfig")
+	}
+	if !bytes.Contains(docs[1], []byte("VolumeConfig")) {
+		t.Error("second doc should contain VolumeConfig")
+	}
+	if !bytes.Contains(docs[2], []byte("RawVolumeConfig")) {
+		t.Error("third doc should contain RawVolumeConfig")
+	}
+}
+
+func TestSplitYAMLDocuments_LeadingSeparator(t *testing.T) {
+	input := []byte(`---
+machine:
+  type: controlplane
+---
+apiVersion: v1alpha1
+kind: VolumeConfig
+`)
+	docs := splitYAMLDocuments(input)
+	if len(docs) != 2 {
+		t.Fatalf("expected 2 documents, got %d", len(docs))
+	}
+}
+
+// ─── Inject pipeline preserves multi-document YAML ─────────────────────────
+
+func TestInjectPipeline_PreservesVolumeConfig(t *testing.T) {
+	// Simulates a full inject pipeline on multi-document YAML from CABPT
+	input := []byte(`machine:
+  type: controlplane
+cluster:
+  clusterName: test
+---
+apiVersion: v1alpha1
+kind: VolumeConfig
+name: EPHEMERAL
+provisioning:
+  maxSize: 100GB
+`)
+
+	// Run through the inject pipeline (same order as stateApplyConfig)
+	data, err := injectInstallDisk(input, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("injectInstallDisk: %v", err)
+	}
+	data, err = injectHostname(data, "fsn1", 2938104, "compute")
+	if err != nil {
+		t.Fatalf("injectHostname: %v", err)
+	}
+	data, err = injectSecretboxEncryptionSecret(data, "SECRET_KEY")
+	if err != nil {
+		t.Fatalf("injectSecretboxEncryptionSecret: %v", err)
+	}
+	data, err = injectProviderID(data, "hetzner-robot://2938104")
+	if err != nil {
+		t.Fatalf("injectProviderID: %v", err)
+	}
+
+	resultStr := string(data)
+
+	// First document should have all injections
+	if !strings.Contains(resultStr, "disk: /dev/nvme0n1") {
+		t.Error("install disk missing from first document")
+	}
+	if !strings.Contains(resultStr, "hostname: compute-fsn1-2938104") {
+		t.Error("hostname missing from first document")
+	}
+	if !strings.Contains(resultStr, "secretboxEncryptionSecret: SECRET_KEY") {
+		t.Error("secretbox key missing from first document")
+	}
+	if !strings.Contains(resultStr, "provider-id: hetzner-robot://2938104") {
+		t.Error("provider-id missing from first document")
+	}
+
+	// VolumeConfig document must survive the entire pipeline
+	if !strings.Contains(resultStr, "kind: VolumeConfig") {
+		t.Error("VolumeConfig document was dropped during inject pipeline")
+	}
+	if !strings.Contains(resultStr, "maxSize: 100GB") {
+		t.Error("VolumeConfig maxSize was dropped during inject pipeline")
+	}
+}
+
+// ─── ensureMap ─────────────────────────────────────────────────────────────
+
+func TestEnsureMap_ExistingKey(t *testing.T) {
+	parent := map[string]interface{}{
+		"machine": map[string]interface{}{"type": "controlplane"},
+	}
+	machine := ensureMap(parent, "machine")
+	if machine["type"] != "controlplane" {
+		t.Errorf("expected existing value preserved, got %v", machine["type"])
+	}
+}
+
+func TestEnsureMap_MissingKey(t *testing.T) {
+	parent := map[string]interface{}{}
+	machine := ensureMap(parent, "machine")
+	if machine == nil {
+		t.Fatal("expected non-nil map")
+	}
+	machine["type"] = "worker"
+	if parent["machine"].(map[string]interface{})["type"] != "worker" {
+		t.Error("expected parent to reference the same map")
+	}
+}
+
+// ─── injectInstallDisk ─────────────────────────────────────────────────────
 
 func TestInjectInstallDisk(t *testing.T) {
 	input := []byte(`machine:
