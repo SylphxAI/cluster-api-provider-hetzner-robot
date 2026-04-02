@@ -85,6 +85,39 @@ func IsInMaintenanceMode(ctx context.Context, ip string) bool {
 	return true // unexpected success — treat as maintenance mode
 }
 
+// WipeEFIPartition connects to a Talos node in maintenance mode and wipes
+// the EFI partition (nvme0n1p1) so that PXE rescue can boot on next reset.
+// This is needed when reprovisioning a node that already has Talos installed —
+// the UKI boot entry in EFI takes priority over PXE.
+func WipeEFIPartition(ctx context.Context, ip string) error {
+	wipeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	conn, err := newInsecureConn(wipeCtx, ip)
+	if err != nil {
+		return fmt.Errorf("connect to %s for EFI wipe: %w", ip, err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	client := machinepb.NewMachineServiceClient(conn)
+
+	// Reset with EFI + STATE wipe — this removes the Talos UKI boot entry
+	// and clears the STATE partition so Talos can't boot from disk.
+	_, err = client.Reset(wipeCtx, &machinepb.ResetRequest{
+		Graceful: false,
+		Reboot:   true,
+		SystemPartitionsToWipe: []*machinepb.ResetPartitionSpec{
+			{Label: "EFI"},
+			{Label: "BIOS"},
+			{Label: "STATE"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("reset with EFI wipe on %s: %w", ip, err)
+	}
+	return nil
+}
+
 // IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.
 func IsK8sAPIUp(ctx context.Context, ip string) bool {
 	return tcpReachable(ctx, ip, 6443)

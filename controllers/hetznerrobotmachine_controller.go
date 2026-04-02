@@ -480,13 +480,15 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
 	// of the rescue system. Detect this by checking if Talos is already up.
 	if talos.IsUp(ctx, serverIP) {
-		if talos.IsInMaintenanceMode(ctx, serverIP) {
-			// Talos maintenance mode — skip rescue, proceed directly to config apply.
+		if talos.IsInMaintenanceMode(ctx, serverIP) && hrm.Status.PrimaryMAC != "" {
+			// Talos maintenance mode AND we already have hardware info from rescue.
+			// Skip rescue, proceed directly to config apply.
 			logger.Info("Rescue active but Talos booted from disk in maintenance mode — skipping rescue/install", "ip", serverIP)
 			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}
-		// Talos is running in full mode (old/stale config) — rescue didn't take effect.
+		// Talos booted instead of PXE rescue (maintenance or full mode).
+		// EFI boot order has Talos UKI before PXE — need to wipe EFI and retry.
 		hrm.Status.RetryCount++
 		now2 := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now2
@@ -495,6 +497,15 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 				"serverID", serverID, "retryCount", hrm.Status.RetryCount)
 			hrm.Status.ProvisioningState = infrav1.StateError
 			return ctrl.Result{}, nil
+		}
+		// Try to wipe EFI boot entries via Talos API so PXE can boot next time.
+		if talos.IsInMaintenanceMode(ctx, serverIP) {
+			logger.Info("Wiping EFI partition via Talos maintenance API to allow PXE boot",
+				"serverID", serverID, "ip", serverIP)
+			if err := talos.WipeEFIPartition(ctx, serverIP); err != nil {
+				logger.Info("Failed to wipe EFI via Talos API (will retry via rescue)",
+					"error", err, "ip", serverIP)
+			}
 		}
 		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
 			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
