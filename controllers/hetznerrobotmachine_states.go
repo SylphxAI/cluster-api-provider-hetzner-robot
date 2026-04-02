@@ -66,7 +66,12 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 
 	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
 	logger.Info("Rescue activated, server resetting", "serverID", serverID)
-	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
+	// Hetzner rescue is one-shot: the rescue API flag is consumed on first PXE boot.
+	// After hw reset, BIOS POST + PXE load + rescue boot takes 3-4 minutes.
+	// If we poll before rescue SSH is up, the API reports rescue as inactive
+	// (consumed) and nothing is reachable → we'd incorrectly re-activate rescue,
+	// interrupting the boot. Wait 4 minutes to give rescue time to fully load.
+	return ctrl.Result{RequeueAfter: 4 * time.Minute}, nil
 }
 
 // stateCheckRescueActive waits for SSH to be available in rescue mode.
@@ -179,11 +184,15 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			// Wipe EFI so PXE can boot on next reset. Try insecure first (maintenance),
 			// then authenticated (full mode with mTLS from bootstrap data).
 			r.attemptEFIWipe(ctx, serverIP, machine)
-		} else {
-			logger.Info("Rescue no longer active and nothing reachable, re-activating rescue",
-				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+			return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 		}
-		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
+		// Nothing reachable and rescue inactive. Most likely: server is still booting
+		// after a recent hw reset — Hetzner rescue is one-shot (consumed on first PXE
+		// boot) and SSH takes 3-4 minutes to come up. Wait rather than re-activate,
+		// which would interrupt an in-progress rescue boot.
+		logger.Info("Rescue inactive but nothing reachable — server likely still booting, waiting",
+			"serverID", serverID, "ip", serverIP)
+		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
 	}
 
 	// Rescue is armed but SSH not up yet.
