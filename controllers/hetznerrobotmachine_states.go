@@ -79,6 +79,7 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	robotClient *robot.Client,
 	serverID int,
 	serverIP string,
+	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -167,8 +168,11 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			return ctrl.Result{}, nil
 		}
 		if talos.IsUp(ctx, serverIP) {
-			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, re-activating rescue",
+			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, wiping EFI + re-activating rescue",
 				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+			// Wipe EFI so PXE can boot on next reset. Try insecure first (maintenance),
+			// then authenticated (full mode with mTLS from bootstrap data).
+			r.attemptEFIWipe(ctx, serverIP, machine)
 		} else {
 			logger.Info("Rescue no longer active and nothing reachable, re-activating rescue",
 				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
@@ -198,17 +202,11 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 			hrm.Status.ProvisioningState = infrav1.StateError
 			return ctrl.Result{}, nil
 		}
-		// Try to wipe EFI boot entries via Talos API so PXE can boot next time.
-		// Always attempt — works in maintenance mode (insecure API). For full mode,
-		// the insecure connection will fail but retryCount still increments.
+		// Wipe EFI boot entries via Talos API so PXE can boot next time.
+		// Try insecure (maintenance) first, then authenticated (full mode with mTLS).
 		logger.Info("Attempting to wipe EFI partition via Talos API to allow PXE boot",
 			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
-		if err := talos.WipeEFIPartition(ctx, serverIP); err != nil {
-			logger.Info("EFI wipe via maintenance API failed (node may be in full mode) — will retry on next cycle",
-				"error", err, "ip", serverIP)
-		} else {
-			logger.Info("Successfully wiped EFI via Talos API — PXE should boot on next reset", "ip", serverIP)
-		}
+		r.attemptEFIWipe(ctx, serverIP, machine)
 		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
 			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
@@ -217,6 +215,48 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	// Neither SSH (rescue) nor Talos (disk) is up — server is still booting.
 	logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
 	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+}
+
+// attemptEFIWipe tries to wipe EFI + STATE partitions via the Talos API.
+// First tries the insecure maintenance API (no client cert). If that fails
+// (node is in full mode, not maintenance), falls back to an authenticated
+// connection using the admin TLS credentials from the Machine's bootstrap data.
+// Best-effort: logs failures but never returns an error — the caller retries
+// on next reconcile cycle via rescue re-activation + hardware reset.
+func (r *HetznerRobotMachineReconciler) attemptEFIWipe(
+	ctx context.Context,
+	serverIP string,
+	machine *clusterv1.Machine,
+) {
+	logger := log.FromContext(ctx)
+
+	// Try insecure wipe first (works if node is in maintenance mode).
+	if err := talos.WipeEFIPartition(ctx, serverIP); err == nil {
+		logger.Info("Successfully wiped EFI via Talos maintenance API — PXE should boot on next reset",
+			"ip", serverIP)
+		return
+	}
+
+	// Insecure wipe failed — node is likely in full mode (requires mTLS).
+	// Fall back to authenticated wipe using bootstrap data.
+	if machine == nil {
+		logger.Info("EFI wipe via maintenance API failed and no Machine available for authenticated wipe",
+			"ip", serverIP)
+		return
+	}
+	machineConfigData, err := r.getBootstrapData(ctx, machine)
+	if err != nil {
+		logger.Info("EFI wipe via maintenance API failed, cannot get bootstrap data for authenticated wipe",
+			"error", err, "ip", serverIP)
+		return
+	}
+	if err := talos.WipeEFIPartitionAuthenticated(ctx, serverIP, machineConfigData); err != nil {
+		logger.Info("Both maintenance and authenticated EFI wipe failed — will retry on next cycle",
+			"error", err, "ip", serverIP)
+		return
+	}
+	logger.Info("Successfully wiped EFI via authenticated Talos API — PXE should boot on next reset",
+		"ip", serverIP)
 }
 
 // stateInstallTalos SSHes into rescue and installs Talos.
@@ -452,6 +492,7 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 	robotClient *robot.Client,
 	serverID int,
 	serverIP string,
+	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -464,10 +505,11 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 
 	// Edge case: if Talos is up but NOT in maintenance mode, the dd install
 	// didn't fully wipe the STATE partition — old config persisted and Talos
-	// booted in full mode. Re-activate rescue to wipe and reinstall cleanly.
+	// booted in full mode. Wipe EFI + re-activate rescue to wipe and reinstall.
 	if talos.IsUp(ctx, serverIP) {
-		logger.Info("Talos booted in full mode after install (old config persisted) — re-activating rescue to reinstall",
+		logger.Info("Talos booted in full mode after install (old config persisted) — wiping EFI + re-activating rescue to reinstall",
 			"serverID", serverID, "ip", serverIP)
+		r.attemptEFIWipe(ctx, serverIP, machine)
 		hrm.Status.RetryCount++
 		now := metav1.Now()
 		hrm.Status.LastRetryTimestamp = &now

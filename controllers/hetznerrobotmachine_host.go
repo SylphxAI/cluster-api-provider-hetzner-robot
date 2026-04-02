@@ -32,6 +32,27 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 		return hrh, nil
 	}
 
+	// Recovery: if HRM has no hostRef but a host is already Claimed by this HRM,
+	// re-adopt it. This handles the case where CAPHR pod restarted after the host
+	// was claimed (HRH.Status.MachineRef set + patched) but before HRM.Status.HostRef
+	// was persisted. Without this, the HRM retries host selection, finds no Available
+	// host (original is stuck in Claimed), and loops forever.
+	allHosts := &infrav1.HetznerRobotHostList{}
+	if err := r.List(ctx, allHosts, client.InNamespace(hrm.Namespace)); err != nil {
+		return nil, fmt.Errorf("list hosts for claim recovery: %w", err)
+	}
+	for i := range allHosts.Items {
+		h := &allHosts.Items[i]
+		if h.Status.MachineRef != nil &&
+			h.Status.MachineRef.Name == hrm.Name &&
+			h.Status.MachineRef.Namespace == hrm.Namespace {
+			hrm.Status.HostRef = h.Name
+			logger.Info("Recovered host claim after controller restart",
+				"host", h.Name, "serverID", h.Spec.ServerID)
+			return h, nil
+		}
+	}
+
 	// Find the HRH to claim.
 	var candidateName string
 	if hrm.Spec.HostRef != nil && hrm.Spec.HostRef.Name != "" {
