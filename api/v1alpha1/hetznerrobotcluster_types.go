@@ -53,18 +53,12 @@ type HetznerRobotClusterSpec struct {
 	// +optional
 	VLANConfig *VLANConfig `json:"vlanConfig,omitempty"`
 
-	// TalosSecretRef references the cluster-level Talos secret (typically {cluster-name}-talos)
-	// containing the correct secretboxEncryptionSecret. CAPT may generate a different key
-	// per Machine; this ensures all nodes use the same encryption key for etcd secrets.
-	// If set, CAPHR reads the key from this secret and injects it into the machineconfig.
-	// +optional
-	TalosSecretRef *corev1.SecretReference `json:"talosSecretRef,omitempty"`
+	// TalosSecretRef removed — CABPT/CACPPT already shares cluster-level
+	// secrets (secretboxEncryptionSecret, serviceAccount.key) across all CP nodes.
+	// CAPHR's previous injection was redundant (overwriting with identical values).
 
-	// DC is the Hetzner datacenter identifier (e.g. "fsn1", "nbg1", "hel1").
-	// Used in hostname generation: compute-<dc>-<serverID>.
-	// Defaults to "fsn1" if not set.
-	// +optional
-	DC string `json:"dc,omitempty"`
+	// DC removed — hostname is managed by CABPT via HostnameConfig document.
+	// CAPHR no longer injects hostname.
 }
 
 // HetznerRobotClusterStatus defines the observed state of HetznerRobotCluster.

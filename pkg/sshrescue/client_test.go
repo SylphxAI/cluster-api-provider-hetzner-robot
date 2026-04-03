@@ -536,33 +536,6 @@ func TestInstallTalos_ShellInjectionPrevented(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ResolveInstallDisk
-// ---------------------------------------------------------------------------
-
-func TestResolveInstallDisk_RequiresConnection(t *testing.T) {
-	c := New("127.0.0.1", []byte("key"))
-	_, err := c.ResolveInstallDisk("/dev/nvme0n1")
-	if err == nil {
-		t.Fatal("expected error when calling ResolveInstallDisk without connection")
-	}
-	if !strings.Contains(err.Error(), "not connected") {
-		t.Errorf("expected 'not connected' in error, got: %v", err)
-	}
-}
-
-func TestResolveInstallDisk_ErrorWrapsContext(t *testing.T) {
-	c := New("127.0.0.1", []byte("key"))
-	_, err := c.ResolveInstallDisk("/dev/nvme0n1")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	// The error should be wrapped with "resolve install disk" context.
-	if !strings.Contains(err.Error(), "resolve install disk") {
-		t.Errorf("expected 'resolve install disk' in error, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // WipeAllDisks
 // ---------------------------------------------------------------------------
 
@@ -849,95 +822,8 @@ func TestResolveInstallDiskFromInfo_SingleDiskNoCeph(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ResolveStableDiskPath
-// ---------------------------------------------------------------------------
-
-func TestResolveStableDiskPath_AlreadyStablePath(t *testing.T) {
-	// Paths already under /dev/disk/by-id/ should be returned as-is
-	// WITHOUT any SSH connection — this is a pure logic branch.
-	c := New("127.0.0.1", []byte("key"))
-	stablePaths := []string{
-		"/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_1TB_S5H9NS0N123456",
-		"/dev/disk/by-id/nvme-WDC_PC_SN720_123456",
-		"/dev/disk/by-id/ata-VBOX_HARDDISK_VBaaaaaaaa-bbbbbbbb",
-	}
-
-	for _, path := range stablePaths {
-		t.Run(path, func(t *testing.T) {
-			got, err := c.ResolveStableDiskPath(path)
-			if err != nil {
-				t.Fatalf("unexpected error for stable path %q: %v", path, err)
-			}
-			if got != path {
-				t.Errorf("stable path should be returned as-is:\n  got:  %s\n  want: %s", got, path)
-			}
-		})
-	}
-}
-
-func TestResolveStableDiskPath_BareDeviceRequiresConnection(t *testing.T) {
-	// Bare device paths (not /dev/disk/by-id/) require SSH to resolve.
-	c := New("127.0.0.1", []byte("key"))
-	_, err := c.ResolveStableDiskPath("/dev/nvme0n1")
-	// ResolveStableDiskPath returns (disk, nil) on failure — best-effort fallback.
-	// With no connection, Run fails, and it returns the original path.
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestResolveStableDiskPath_BareDeviceFallsBackOnError(t *testing.T) {
-	// When SSH is unavailable, bare paths are returned as-is (best-effort).
-	c := New("127.0.0.1", []byte("key"))
-	disk := "/dev/nvme1n1"
-	got, err := c.ResolveStableDiskPath(disk)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != disk {
-		t.Errorf("expected fallback to original disk %q, got %q", disk, got)
-	}
-}
-
-func TestResolveStableDiskPath_AlreadyStableExactPrefix(t *testing.T) {
-	// Ensure the prefix check is exact — a path that starts with
-	// "/dev/disk/by-id/" but is otherwise unusual should still pass through.
-	c := New("127.0.0.1", []byte("key"))
-	path := "/dev/disk/by-id/"
-	got, err := c.ResolveStableDiskPath(path)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != path {
-		t.Errorf("expected %q returned as-is, got %q", path, got)
-	}
-}
-
-func TestResolveStableDiskPath_SimilarPrefixNotMatched(t *testing.T) {
-	// A path that looks similar but is NOT under /dev/disk/by-id/ should
-	// attempt SSH resolution (and fall back to original without connection).
-	c := New("127.0.0.1", []byte("key"))
-	paths := []string{
-		"/dev/disk/by-path/pci-0000:00:1f.2",
-		"/dev/disk/by-uuid/1234-5678",
-		"/dev/disk/by-label/root",
-	}
-	for _, path := range paths {
-		t.Run(path, func(t *testing.T) {
-			got, err := c.ResolveStableDiskPath(path)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			// These paths don't match the /dev/disk/by-id/ prefix, so Run is called.
-			// Run fails with "not connected", but ResolveStableDiskPath returns
-			// the original path as fallback.
-			if got != path {
-				t.Errorf("expected fallback to %q, got %q", path, got)
-			}
-		})
-	}
-}
+// ResolveStableDiskPath and ResolveInstallDisk removed — replaced by
+// DetectHardware() + ResolveInstallDiskFromInfo() (pure Go, no SSH).
 
 // ---------------------------------------------------------------------------
 // IsRescueMode

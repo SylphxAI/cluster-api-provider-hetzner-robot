@@ -221,59 +221,6 @@ func ResolveInstallDiskFromInfo(hw *HardwareInfo, configuredDisk string) (string
 	return safes[0], nil
 }
 
-// ResolveInstallDisk determines the correct install disk in the rescue environment.
-// NVMe device names (nvme0n1, nvme1n1) can swap between rescue and Talos boot
-// due to different PCI probe order. This function finds the correct disk by
-// checking which NVMe device does NOT have Ceph BlueStore data.
-//
-// Logic:
-//  1. List all NVMe whole-disk devices
-//  2. For each, check blkid for ceph_bluestore signature
-//  3. Return the one WITHOUT BlueStore (= safe to install Talos)
-//  4. If neither has BlueStore (fresh server), use the configured installDisk
-//  5. If BOTH have BlueStore, refuse (shouldn't happen)
-func (c *Client) ResolveInstallDisk(configuredDisk string) (string, error) {
-	out, err := c.Run(
-		`DISKS=$(lsblk -dnpo NAME,TYPE | awk '$2=="disk" && $1 ~ /nvme/ {print $1}'); ` +
-			`SAFE=""; ` +
-			`CEPH=""; ` +
-			`for d in $DISKS; do ` +
-			`if blkid "$d" 2>/dev/null | grep -q ceph_bluestore; then ` +
-			`CEPH="$CEPH $d"; ` +
-			`else ` +
-			`SAFE="$SAFE $d"; ` +
-			`fi; ` +
-			`done; ` +
-			`SAFE=$(echo $SAFE | xargs); ` +
-			`CEPH=$(echo $CEPH | xargs); ` +
-			`if [ -z "$SAFE" ]; then ` +
-			`echo "ERROR:all_disks_have_bluestore"; ` +
-			`elif echo "$SAFE" | grep -q " "; then ` +
-			// Multiple safe disks — use the configured one if it's in the safe list
-			`if echo "$SAFE" | grep -qw "` + configuredDisk + `"; then ` +
-			`echo "` + configuredDisk + `"; ` +
-			`else ` +
-			`echo "$SAFE" | awk '{print $1}'; ` +
-			`fi; ` +
-			`else ` +
-			`echo "$SAFE"; ` +
-			`fi`,
-	)
-	if err != nil {
-		return "", fmt.Errorf("resolve install disk: %w\nOutput: %s", err, out)
-	}
-
-	resolved := strings.TrimSpace(out)
-	if resolved == "ERROR:all_disks_have_bluestore" {
-		return "", fmt.Errorf("all NVMe disks have Ceph BlueStore data — cannot determine install disk safely")
-	}
-	if resolved == "" {
-		return configuredDisk, nil // fallback
-	}
-
-	return resolved, nil
-}
-
 // WipeAllDisks wipes all specified disks in parallel using a single SSH command.
 // Each disk undergoes a thorough wipe: wipefs + sgdisk + dd + blkdiscard.
 // blkdiscard alone is NOT enough — NVMe TRIM is advisory, the controller may
@@ -332,45 +279,6 @@ func (c *Client) WipeAllDisks(disks []string) (string, error) {
 	}
 
 	return out, nil
-}
-
-// ResolveStableDiskPath resolves a bare NVMe device path (e.g. /dev/nvme0n1)
-// to its stable /dev/disk/by-id/ path using the disk's serial number.
-// This is critical because NVMe device names swap between rescue mode and Talos
-// boot due to different PCI probe order. The by-id path references the physical
-// disk deterministically regardless of enumeration order.
-//
-// If the disk is already a /dev/disk/by-id/ path, it is returned as-is.
-// Returns the original disk path if resolution fails (best-effort).
-func (c *Client) ResolveStableDiskPath(disk string) (string, error) {
-	// Already a stable path — nothing to resolve
-	if strings.HasPrefix(disk, "/dev/disk/by-id/") {
-		return disk, nil
-	}
-
-	// Get the basename (e.g. "nvme0n1" from "/dev/nvme0n1")
-	basename := disk
-	if idx := strings.LastIndex(disk, "/"); idx >= 0 {
-		basename = disk[idx+1:]
-	}
-
-	// Find the by-id symlink that points to this device (excluding partition entries)
-	cmd := fmt.Sprintf(
-		`ls -la /dev/disk/by-id/ 2>/dev/null | grep -E '%s$' | grep nvme | grep -v part | awk '{print $9}' | head -1`,
-		basename,
-	)
-	out, err := c.Run(cmd)
-	if err != nil {
-		return disk, nil // best-effort: return original on failure
-	}
-
-	byIDName := strings.TrimSpace(out)
-	if byIDName == "" {
-		return disk, nil // no by-id link found, return original
-	}
-
-	stablePath := "/dev/disk/by-id/" + byIDName
-	return stablePath, nil
 }
 
 // InstallTalos installs Talos Linux by writing the factory raw disk image
