@@ -88,16 +88,7 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Priority 1: Check Talos maintenance mode (UEFI NVMe-first boot order may skip rescue PXE).
-	// Only skip rescue if hardware info is available (from a previous rescue session).
-	// Without primaryMAC, config apply will fail — must go through rescue for DetectHardware.
-	if hrm.Status.PrimaryMAC != "" && talos.IsInMaintenanceMode(ctx, serverIP) {
-		logger.Info("Talos maintenance mode detected (hardware info available), skipping rescue/install", "ip", serverIP)
-		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-	}
-
-	// Priority 2: Check if rescue SSH is already up.
+	// Check if rescue SSH is already up.
 	// IMPORTANT: Must verify it's actually rescue, not a pre-existing OS (Debian/Talos).
 	// A pre-existing OS has SSH on port 22 too — treating it as rescue causes installer
 	// failures (installer expects rescue environment, not a running OS).
@@ -151,25 +142,9 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	}
 
 	if !rescueStatus.Active {
-		// Rescue inactive AND SSH closed. Could mean:
-		//   (a) Server rebooted back to normal OS (old Talos running, NOT our cluster) → re-activate rescue
-		//   (b) Talos was successfully installed and is in maintenance mode → proceed
-		//   (c) Talos was successfully installed, config applied, running in full mode → advance
-		//
-		// IMPORTANT: We can ONLY safely skip rescue/install if Talos is in maintenance mode.
-		// If Talos is in full running mode, we CANNOT distinguish between:
-		//   - Our freshly installed Talos (config applied, node joined) → safe to advance
-		//   - An OLD Talos from a previous cluster (different CA) → MUST rescue+wipe
-		//
-		// Since the HRM is not yet in StateProvisioned (we're in StateCheckRescueActive),
-		// the only safe assumption for full-mode Talos is: it's stale. Re-activate rescue.
-		if talos.IsInMaintenanceMode(ctx, serverIP) {
-			// Maintenance mode: Talos installed, waiting for machineconfig.
-			logger.Info("Talos in maintenance mode (rescue consumed after install), proceeding", "ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-		}
-		// Either Talos is in full mode (stale OS) or not reachable at all.
+		// Rescue inactive. Server may have booted something else (Talos, old OS) or
+		// is still mid-boot after a recent hw reset. No shortcuts — we always need
+		// rescue for a clean provision (wipe all + fresh install).
 		// In both cases, re-activate rescue and wipe.
 		hrm.Status.RetryCount++
 		now := metav1.Now()
@@ -201,14 +176,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
 	// of the rescue system. Detect this by checking if Talos is already up.
 	if talos.IsUp(ctx, serverIP) {
-		if talos.IsInMaintenanceMode(ctx, serverIP) && hrm.Status.PrimaryMAC != "" {
-			// Talos maintenance mode AND we already have hardware info from rescue.
-			// Skip rescue, proceed directly to config apply.
-			logger.Info("Rescue active but Talos booted from disk in maintenance mode — skipping rescue/install", "ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-		}
 		// Talos booted instead of PXE rescue (maintenance or full mode).
+		// No shortcuts — always wipe EFI and retry rescue for a clean provision.
 		// EFI boot order has Talos UKI before PXE — need to wipe EFI and retry.
 		hrm.Status.RetryCount++
 		now2 := metav1.Now()
@@ -287,15 +256,7 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Recovery: if Talos maintenance mode is already up (install succeeded but state wasn't saved),
-	// skip to BootingTalos state.
-	if talos.IsInMaintenanceMode(ctx, serverIP) {
-		logger.Info("Talos already in maintenance mode (install completed), skipping re-install", "ip", serverIP)
-		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-	}
-
-	// Also recovery: if port 22 is not accessible, the node may have already rebooted
+	// If port 22 is not accessible, the node may have already rebooted
 	// from a previous install attempt. Activate rescue again and retry.
 	if !sshrescue.IsReachable(serverIP) {
 		logger.Info("Rescue SSH not reachable in InRescue state, activating rescue again", "ip", serverIP)

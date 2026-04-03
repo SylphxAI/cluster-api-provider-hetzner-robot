@@ -21,8 +21,6 @@ import (
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/robot"
-	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/sshrescue"
-	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/talos"
 )
 
 const (
@@ -265,33 +263,10 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	// Run state machine
 	switch hrm.Status.ProvisioningState {
 	case infrav1.StateNone:
-		// Optimization: if Talos is already in maintenance mode (e.g. after talosctl reset)
-		// AND we have hardware info from a previous rescue session, skip rescue/install.
-		// Without hardware info (primaryMAC), config apply will fail — must go through rescue.
-		if hrm.Status.PrimaryMAC != "" && talos.IsInMaintenanceMode(ctx, serverIP) {
-			logger.Info("Node already in Talos maintenance mode, skipping rescue/install", "ip", serverIP)
-			hrm.Status.ProvisioningState = infrav1.StateBootingTalos
-			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-		}
-		// Optimization: if rescue SSH is already open AND verified as rescue mode,
-		// skip rescue activation and go straight to install.
-		// SSH reachable alone is NOT sufficient — a normal OS (Debian) also has SSH on port 22.
-		if sshrescue.IsReachable(serverIP) {
-			privateKey, keyErr := r.getSSHPrivateKey(ctx, hrc)
-			if keyErr == nil {
-				isRescue, rescueErr := sshrescue.IsRescueMode(serverIP, privateKey)
-				if rescueErr == nil && isRescue {
-					logger.Info("Node already in rescue mode (verified), skipping rescue activation", "ip", serverIP)
-					hrm.Status.ProvisioningState = infrav1.StateInRescue
-					return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-				}
-				if rescueErr == nil && !isRescue {
-					logger.Info("SSH reachable but not rescue mode (normal OS detected), proceeding with rescue activation",
-						"ip", serverIP)
-				}
-			}
-			// If key retrieval or rescue check failed, fall through to normal rescue activation.
-		}
+		// Clean slate: always go through the full rescue → wipe → install cycle.
+		// No shortcuts — same contract as cloud VMs. Every provision starts fresh,
+		// regardless of what's currently on disk (stale Talos, old OS, maintenance mode).
+		// This eliminates stale state issues (hostname conflicts, partial configs, etc.).
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP, machine)
