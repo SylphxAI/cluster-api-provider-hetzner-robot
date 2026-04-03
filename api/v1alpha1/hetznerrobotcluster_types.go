@@ -17,9 +17,9 @@ type VLANConfig struct {
 	// +kubebuilder:validation:Maximum=4094
 	ID int `json:"id"`
 
-	// Interface is the parent NIC name (e.g. "enp193s0f0np0").
-	// Must match the physical interface on all servers in this cluster.
-	Interface string `json:"interface"`
+	// Interface removed — CAPHR uses primaryMAC (auto-detected from rescue)
+	// for deviceSelector instead of interface name. NIC names differ between
+	// rescue (eth0) and Talos (enp193s0f0np0); MAC is stable.
 
 	// PrefixLength is the CIDR prefix length for the VLAN subnet (e.g. 24 for /24).
 	// +kubebuilder:validation:Minimum=1
@@ -39,7 +39,8 @@ type HetznerRobotClusterSpec struct {
 	RobotSecretRef corev1.SecretReference `json:"robotSecretRef"`
 
 	// SSHSecretRef references the secret containing the SSH key for rescue access.
-	// The secret must have keys: ssh-privatekey, ssh-publickey
+	// Required key: ssh-privatekey (PEM-encoded private key for root@rescue).
+	// Optional key: ssh-fingerprint (public key fingerprint for rescue activation).
 	SSHSecretRef corev1.SecretReference `json:"sshSecretRef"`
 
 	// TalosFactoryBaseURL is the base URL for the Talos factory image.

@@ -123,5 +123,4 @@ spec:
   # Each host's internalIP is injected into the Talos machineconfig during provisioning.
   vlanConfig:
     id: 4000
-    interface: enp193s0f0np0
     prefixLength: 24

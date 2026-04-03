@@ -279,7 +279,6 @@ cluster:
 `)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4000,
-		Interface:    "enp193s0f0np0",
 		PrefixLength: 24,
 	}
 
@@ -367,7 +366,7 @@ func TestInjectVLANConfig_EmptyInternalIP(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0"}
+	vlanCfg := &infrav1.VLANConfig{ID: 4000}
 	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff", "138.199.242.217", "138.199.242.129")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
@@ -388,7 +387,6 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 `)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4000,
-		Interface:    "enp193s0f0np0",
 		PrefixLength: 24,
 	}
 
@@ -440,8 +438,7 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 func TestInjectVLANConfig_DefaultPrefixLength(t *testing.T) {
 	input := []byte(`machine: {}`)
 	vlanCfg := &infrav1.VLANConfig{
-		ID:        4000,
-		Interface: "eth0",
+		ID: 4000,
 		// PrefixLength not set — should default to 24
 	}
 
@@ -754,7 +751,7 @@ func TestInjectVLANConfig_EmptyInternalIP_NoOp(t *testing.T) {
   network:
     hostname: test-node
 `)
-	vlanCfg := &infrav1.VLANConfig{ID: 4000, Interface: "eth0", PrefixLength: 24}
+	vlanCfg := &infrav1.VLANConfig{ID: 4000, PrefixLength: 24}
 	result, err := injectVLANConfig(input, vlanCfg, "", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")
 	if err != nil {
 		t.Fatalf("injectVLANConfig failed: %v", err)
@@ -778,8 +775,7 @@ func TestInjectVLANConfig_MergeExistingInterfaceWithMAC(t *testing.T) {
 `)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4001,
-		Interface:    "eth0",
-		PrefixLength: 28,
+				PrefixLength: 28,
 	}
 
 	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.10", "11:22:33:44:55:66", "5.6.7.8", "5.6.7.1")
@@ -827,8 +823,7 @@ func TestInjectVLANConfig_PrefixLengthZero_DefaultsTo24(t *testing.T) {
 	input := []byte(`machine: {}`)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4000,
-		Interface:    "eth0",
-		PrefixLength: 0, // explicitly zero
+				PrefixLength: 0, // explicitly zero
 	}
 
 	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.99", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")

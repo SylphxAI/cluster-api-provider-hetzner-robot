@@ -94,8 +94,9 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 				// SSH reachable but NOT rescue — server booted existing OS.
 				// With PXE-first boot order (set post-install), re-activating rescue
 				// + hw reset is sufficient — PXE will boot rescue on next reboot.
-				logger.Info("SSH reachable but not rescue (existing OS detected), will re-activate rescue",
+				logger.Info("SSH reachable but not rescue (existing OS detected), re-activating rescue",
 					"ip", serverIP)
+				return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 			}
 		}
 		// SSH reachable but can't authenticate — might be rescue with wrong key or existing OS
