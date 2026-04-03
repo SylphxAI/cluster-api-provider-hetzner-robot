@@ -55,6 +55,15 @@ spec:
           spec:
             description: HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
             properties:
+              ephemeralSize:
+                description: |-
+                  EphemeralSize, if set, limits the Talos EPHEMERAL partition (/var) to this size
+                  and creates a raw data partition ("osd-data") with the remaining disk space.
+                  Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
+                  The data partition appears at /dev/disk/by-partlabel/r-osd-data and is
+                  intended for Ceph OSD use. Only applicable to storage nodes.
+                  Example: "100GiB"
+                type: string
               hostRef:
                 description: |-
                   HostRef is a direct reference to a specific HetznerRobotHost by name.
@@ -119,15 +128,6 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              ephemeralSize:
-                description: |-
-                  EphemeralSize, if set, limits the Talos EPHEMERAL partition (/var) to this size
-                  and creates a raw data partition ("osd-data") with the remaining disk space.
-                  Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
-                  The data partition appears at /dev/disk/by-partlabel/r-osd-data and is
-                  intended for Ceph OSD use. Only applicable to storage nodes.
-                  Example: "100GiB"
-                type: string
               installDisk:
                 default: /dev/nvme0n1
                 description: |-
@@ -253,24 +253,31 @@ spec:
                   Used for Talos deviceSelector — hardware-based NIC identification that works
                   regardless of OS naming (rescue eth0 vs Talos enp193s0f0np0).
                 type: string
+              provisionStarted:
+                description: |-
+                  ProvisionStarted is set when provisioning begins (first reconcile in StateNone).
+                  Used for provision timeout: if provisioning doesn't complete within the timeout,
+                  the machine enters StateError → CAPI marks it Failed → MHC remediates.
+                  This ensures rolling updates are never blocked by a single stuck machine.
+                format: date-time
+                type: string
               provisioningState:
                 description: ProvisioningState is the current state of provisioning.
-                type: string
-              resolvedInstallDisk:
-                description: |-
-                  ResolvedInstallDisk is the stable /dev/disk/by-id/ path for the install disk,
-                  resolved from the bare NVMe device name during rescue. Used by stateApplyConfig
-                  to inject into the Talos machineconfig, ensuring the correct physical disk is
-                  referenced regardless of NVMe enumeration order across reboots.
                 type: string
               ready:
                 description: Ready indicates the machine is provisioned and healthy.
                 type: boolean
+              resolvedInstallDisk:
+                description: |-
+                  ResolvedInstallDisk is the stable /dev/disk/by-id/ path resolved during rescue.
+                  NVMe device names (/dev/nvme0n1) swap between rescue and Talos boot due to
+                  different PCI probe order. This stable path ensures both the installer and
+                  Talos machineconfig reference the same physical disk.
+                type: string
               retryCount:
                 description: |-
-                  RetryCount tracks consecutive transient reconciliation errors for the current state.
-                  Reset to 0 on success. Used for exponential backoff calculation.
-                  Only permanent errors (config issues, missing resources) enter terminal StateError.
+                  RetryCount tracks consecutive transient reconciliation errors.
+                  Used for exponential backoff spacing between retries.
                 type: integer
             type: object
         type: object
