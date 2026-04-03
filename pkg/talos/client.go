@@ -85,6 +85,32 @@ func IsInMaintenanceMode(ctx context.Context, ip string) bool {
 	return true // unexpected success — treat as maintenance mode
 }
 
+// WipeSystemDisk connects to a Talos node via insecure (maintenance mode) API
+// and resets with Mode=SYSTEM_DISK, wiping all system partitions including EFI.
+// Used to clear stale EFI boot order on nodes that haven't had the PXE-first
+// post-install fix applied yet. After wipe, PXE can boot on next hw reset.
+func WipeSystemDisk(ctx context.Context, ip string) error {
+	wipeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	conn, err := newInsecureConn(wipeCtx, ip)
+	if err != nil {
+		return fmt.Errorf("connect to %s for system disk wipe: %w", ip, err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	client := machinepb.NewMachineServiceClient(conn)
+	_, err = client.Reset(wipeCtx, &machinepb.ResetRequest{
+		Graceful: false,
+		Reboot:   true,
+		Mode:     machinepb.ResetRequest_SYSTEM_DISK,
+	})
+	if err != nil {
+		return fmt.Errorf("reset with system disk wipe on %s: %w", ip, err)
+	}
+	return nil
+}
+
 // IsK8sAPIUp checks if the Kubernetes API server (port 6443) is reachable.
 func IsK8sAPIUp(ctx context.Context, ip string) bool {
 	return tcpReachable(ctx, ip, 6443)

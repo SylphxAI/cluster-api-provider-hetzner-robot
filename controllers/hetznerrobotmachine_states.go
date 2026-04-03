@@ -116,10 +116,12 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		// rescue for a clean provision (wipe all + fresh install).
 		// In both cases, re-activate rescue and wipe.
 		if talos.IsUp(ctx, serverIP) {
-			// Talos booted instead of rescue. With PXE-first boot order, re-activating
-			// rescue + hw reset is sufficient — PXE will load rescue on next boot.
-			logger.Info("Talos detected during early provisioning — re-activating rescue",
+			// Talos booted instead of rescue — wipe system disk to clear stale EFI entries.
+			logger.Info("Talos detected during early provisioning — wiping system disk",
 				"serverID", serverID, "ip", serverIP)
+			if err := talos.WipeSystemDisk(ctx, serverIP); err != nil {
+				logger.Info("System disk wipe failed (will retry)", "error", err, "ip", serverIP)
+			}
 			return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 		}
 		// Nothing reachable and rescue inactive. Most likely: server is still booting
@@ -135,11 +137,19 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
 	// of the rescue system. Detect this by checking if Talos is already up.
 	if talos.IsUp(ctx, serverIP) {
-		// Talos booted from disk instead of PXE rescue. With PXE-first boot order,
-		// this means the post-install EFI fix hasn't been applied yet (first provision)
-		// or BIOS firmware is non-compliant. Re-activate rescue + hw reset.
-		logger.Info("Rescue active but Talos booted from disk — re-activating rescue",
+		// Talos booted from disk instead of PXE rescue. The post-install EFI fix
+		// (PXE first) hasn't been applied yet — this node has old EFI boot order.
+		// Wipe system disk via Talos maintenance API to clear EFI + STATE,
+		// then PXE can boot on next reset.
+		logger.Info("Rescue active but Talos booted from disk — wiping system disk via Talos API",
 			"serverID", serverID, "ip", serverIP)
+		if err := talos.WipeSystemDisk(ctx, serverIP); err != nil {
+			logger.Info("System disk wipe via Talos API failed (will retry on next cycle)",
+				"error", err, "ip", serverIP)
+		} else {
+			logger.Info("System disk wiped via Talos API — PXE should boot on next reset",
+				"ip", serverIP)
+		}
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
