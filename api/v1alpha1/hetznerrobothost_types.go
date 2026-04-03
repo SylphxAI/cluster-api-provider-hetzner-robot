@@ -16,10 +16,6 @@ const (
 	HostStateClaimed HostState = "Claimed"
 	// HostStateProvisioned means Talos has been installed and the node is running.
 	HostStateProvisioned HostState = "Provisioned"
-	// HostStateDeprovisioning means the host is being released (wiping + power off).
-	HostStateDeprovisioning HostState = "Deprovisioning"
-	// HostStateError means an unrecoverable error occurred.
-	HostStateError HostState = "Error"
 )
 
 // HetznerRobotHostSpec defines the desired state of a physical server.

@@ -457,73 +457,8 @@ func TestClose_ZeroValueClient_NoPanic(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// InstallTalos — OCI image URL construction and crane URL
+// InstallTalos — raw image URL construction
 // ---------------------------------------------------------------------------
-
-func TestInstallTalos_InstallerImageURLFormat(t *testing.T) {
-	tests := []struct {
-		name       string
-		factoryURL string
-		schematic  string
-		version    string
-		wantImage  string
-	}{
-		{
-			name:       "standard factory URL with https",
-			factoryURL: "https://factory.talos.dev",
-			schematic:  "376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba",
-			version:    "v1.12.4",
-			wantImage:  "factory.talos.dev/installer/376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba:v1.12.4",
-		},
-		{
-			name:       "custom factory URL with https",
-			factoryURL: "https://custom.factory.example.com",
-			schematic:  "deadbeef",
-			version:    "v2.0.0-beta.1",
-			wantImage:  "custom.factory.example.com/installer/deadbeef:v2.0.0-beta.1",
-		},
-		{
-			name:       "factory URL with http",
-			factoryURL: "http://insecure.factory.local",
-			schematic:  "abcdef",
-			version:    "v1.0.0",
-			wantImage:  "insecure.factory.local/installer/abcdef:v1.0.0",
-		},
-		{
-			name:       "factory URL without scheme",
-			factoryURL: "registry.example.com",
-			schematic:  "abc123",
-			version:    "v1.5.0",
-			wantImage:  "registry.example.com/installer/abc123:v1.5.0",
-		},
-		{
-			name:       "factory URL with trailing path components stripped only of scheme",
-			factoryURL: "https://factory.talos.dev",
-			schematic:  "short",
-			version:    "v1.12.4",
-			wantImage:  "factory.talos.dev/installer/short:v1.12.4",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reconstruct the exact logic from InstallTalos:
-			//   registryHost := factoryURL
-			//   for _, prefix := range []string{"https://", "http://"} {
-			//       registryHost = strings.TrimPrefix(registryHost, prefix)
-			//   }
-			//   installerImage := fmt.Sprintf("%s/installer/%s:%s", registryHost, schematic, version)
-			registryHost := tt.factoryURL
-			for _, prefix := range []string{"https://", "http://"} {
-				registryHost = strings.TrimPrefix(registryHost, prefix)
-			}
-			got := fmt.Sprintf("%s/installer/%s:%s", registryHost, tt.schematic, tt.version)
-			if got != tt.wantImage {
-				t.Errorf("installer image mismatch:\n  got:  %s\n  want: %s", got, tt.wantImage)
-			}
-		})
-	}
-}
 
 func TestInstallTalos_RawImageURLFormat(t *testing.T) {
 	// Verify the raw image URL follows Talos Factory pattern:

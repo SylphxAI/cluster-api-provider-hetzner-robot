@@ -122,8 +122,8 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 	return hrh, nil
 }
 
-// releaseHost sets a HetznerRobotHost back to Available and clears its MachineRef.
-// Used when a HetznerRobotMachine is deleted to return the host to the pool.
+// releaseHost returns a HetznerRobotHost to the pool in a clean state.
+// Clears all machine-specific state so the next claim gets a clean slate.
 func (r *HetznerRobotMachineReconciler) releaseHost(ctx context.Context, namespace, hostName string) error {
 	hrh := &infrav1.HetznerRobotHost{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: hostName}, hrh); err != nil {
@@ -135,6 +135,7 @@ func (r *HetznerRobotMachineReconciler) releaseHost(ctx context.Context, namespa
 	}
 	hrh.Status.State = infrav1.HostStateAvailable
 	hrh.Status.MachineRef = nil
+	hrh.Status.ErrorMessage = ""
 	if err := hrhPatchHelper.Patch(ctx, hrh); err != nil {
 		return fmt.Errorf("patch host %s: %w", hostName, err)
 	}

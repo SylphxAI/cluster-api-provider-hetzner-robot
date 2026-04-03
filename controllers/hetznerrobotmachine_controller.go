@@ -137,9 +137,9 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			hrm.Status.FailureReason = &reason
 			hrm.Status.ProvisioningState = infrav1.StateError
 			hrm.Status.Ready = false
-			logger.Error(nil, "Provision timeout exceeded, entering terminal StateError",
+			logger.Info("Provision timeout exceeded, entering terminal StateError",
 				"timeout", provisionTimeout, "started", hrm.Status.ProvisionStarted.Time,
-				"state", hrm.Status.ProvisioningState)
+				"state", hrm.Status.ProvisioningState, "action", "manual_intervention_required")
 			return ctrl.Result{}, nil
 		}
 	}
@@ -198,8 +198,9 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 // isPermanentError returns true for errors that indicate an unrecoverable configuration
 // or resource issue. These errors will never resolve through retrying — they require
 // human intervention (fix config, add hosts to pool, create missing secrets).
-// All other errors (SSH failures, API timeouts, connection refused, crane/installer
-// failures) are treated as transient and will be retried indefinitely with backoff.
+// All other errors (SSH failures, API timeouts, connection refused, install
+// failures) are treated as transient and will be retried with backoff
+// until the global provisionTimeout is reached.
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
@@ -310,7 +311,6 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, hrh, serverID, serverIP)
 	case infrav1.StateWaitingForBoot:
 		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
-	// StateBootstrapping removed — CACPPT handles etcd bootstrap, not CAPHR.
 	case infrav1.StateError:
 		// Terminal state. No auto-recovery. No polling.
 		// Recovery via MachineHealthCheck remediation or manual Machine deletion.
