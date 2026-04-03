@@ -286,9 +286,21 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	serverIP := hrh.Spec.ServerIP
 	logger.Info("Reconciling machine", "serverID", serverID, "ip", serverIP, "state", hrm.Status.ProvisioningState)
 
-	// Set addresses
+	// Set addresses — report all known IPs to CAPI consumers
+	// (MachineHealthCheck, kubectl get machines, monitoring, etc.).
 	hrm.Status.Addresses = []clusterv1.MachineAddress{
 		{Type: clusterv1.MachineExternalIP, Address: serverIP},
+	}
+	if hrh.Spec.InternalIP != "" {
+		hrm.Status.Addresses = append(hrm.Status.Addresses,
+			clusterv1.MachineAddress{Type: clusterv1.MachineInternalIP, Address: hrh.Spec.InternalIP})
+	}
+	if hrh.Spec.ServerIPv6Net != "" {
+		// Derive the node's IPv6 address from the /64 subnet (same logic as injectIPv6Config).
+		ipv6Prefix := strings.Split(hrh.Spec.ServerIPv6Net, "/")[0]
+		ipv6Addr := strings.TrimSuffix(ipv6Prefix, "::") + "::1"
+		hrm.Status.Addresses = append(hrm.Status.Addresses,
+			clusterv1.MachineAddress{Type: clusterv1.MachineExternalIP, Address: ipv6Addr})
 	}
 
 	// Run state machine
