@@ -484,26 +484,8 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"gatewayIP", gatewayIP)
 	}
 
-	// Inject deterministic hostname: <role>-<dc>-<serverID>.
-	// Role from HetznerRobotHost label (storage → "storage-", else "compute-").
-	// Server ID is immutable (Hetzner hardware ID) — zero collision risk.
-	{
-		dc := hrc.Spec.DC
-		hostRole := hrh.Labels["role"]
-		bootstrapData, err = injectHostname(bootstrapData, dc, serverID, hostRole)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("inject hostname into config: %w", err)
-		}
-		if dc == "" {
-			dc = "fsn1"
-		}
-		prefix := "compute"
-		if hostRole == "storage" {
-			prefix = "storage"
-		}
-		hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
-		logger.Info("Injected hostname into machineconfig", "hostname", hostname)
-	}
+	// Hostname: managed by CABPT via HostnameConfig document (auto: stable).
+	// CAPHR does not inject hostname — it's a config-layer concern, not infra.
 
 	// Inject IPv6 config if the host has an IPv6 subnet from Hetzner.
 	// Each Hetzner server gets a /64 — we assign ::1 and route via fe80::1.

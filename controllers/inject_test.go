@@ -174,10 +174,7 @@ provisioning:
 	if err != nil {
 		t.Fatalf("injectInstallDisk: %v", err)
 	}
-	data, err = injectHostname(data, "fsn1", 2938104, "compute")
-	if err != nil {
-		t.Fatalf("injectHostname: %v", err)
-	}
+	// injectHostname removed — hostname managed by CABPT HostnameConfig
 	data, err = injectSecretboxEncryptionSecret(data, "SECRET_KEY")
 	if err != nil {
 		t.Fatalf("injectSecretboxEncryptionSecret: %v", err)
@@ -193,9 +190,7 @@ provisioning:
 	if !strings.Contains(resultStr, "disk: /dev/nvme0n1") {
 		t.Error("install disk missing from first document")
 	}
-	if !strings.Contains(resultStr, "hostname: compute-fsn1-2938104") {
-		t.Error("hostname missing from first document")
-	}
+	// hostname no longer injected by CAPHR — managed by CABPT HostnameConfig
 	if !strings.Contains(resultStr, "secretboxEncryptionSecret: SECRET_KEY") {
 		t.Error("secretbox key missing from first document")
 	}
@@ -889,106 +884,7 @@ name: EPHEMERAL
 
 // ─── injectHostname edge cases ─────────────────────────────────────────────
 
-func TestInjectHostname_ServerIDZero_NoOp(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-`)
-	result, err := injectHostname(input, "fsn1", 0, "compute")
-	if err != nil {
-		t.Fatalf("injectHostname failed: %v", err)
-	}
-	if string(result) != string(input) {
-		t.Error("serverID=0 should return input unchanged")
-	}
-}
-
-func TestInjectHostname_EmptyDC_DefaultsFSN1(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-`)
-	result, err := injectHostname(input, "", 12345, "compute")
-	if err != nil {
-		t.Fatalf("injectHostname failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	machine := config["machine"].(map[string]interface{})
-	network := machine["network"].(map[string]interface{})
-	hostname := network["hostname"].(string)
-	if hostname != "compute-fsn1-12345" {
-		t.Errorf("expected compute-fsn1-12345, got %s", hostname)
-	}
-}
-
-func TestInjectHostname_StorageRole(t *testing.T) {
-	input := []byte(`machine:
-  type: worker
-`)
-	result, err := injectHostname(input, "hel1", 99999, "storage")
-	if err != nil {
-		t.Fatalf("injectHostname failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	machine := config["machine"].(map[string]interface{})
-	network := machine["network"].(map[string]interface{})
-	hostname := network["hostname"].(string)
-	if hostname != "storage-hel1-99999" {
-		t.Errorf("expected storage-hel1-99999, got %s", hostname)
-	}
-}
-
-func TestInjectHostname_ControlPlaneRole_DefaultsCompute(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-`)
-	result, err := injectHostname(input, "nbg1", 55555, "control-plane")
-	if err != nil {
-		t.Fatalf("injectHostname failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	machine := config["machine"].(map[string]interface{})
-	network := machine["network"].(map[string]interface{})
-	hostname := network["hostname"].(string)
-	if hostname != "compute-nbg1-55555" {
-		t.Errorf("expected compute-nbg1-55555, got %s", hostname)
-	}
-}
-
-func TestInjectHostname_EmptyRole_DefaultsCompute(t *testing.T) {
-	input := []byte(`machine:
-  type: worker
-`)
-	result, err := injectHostname(input, "fsn1", 77777, "")
-	if err != nil {
-		t.Fatalf("injectHostname failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	machine := config["machine"].(map[string]interface{})
-	network := machine["network"].(map[string]interface{})
-	hostname := network["hostname"].(string)
-	if hostname != "compute-fsn1-77777" {
-		t.Errorf("expected compute-fsn1-77777, got %s", hostname)
-	}
-}
+// injectHostname tests removed — hostname managed by CABPT HostnameConfig
 
 // ─── injectVLANConfig edge cases ───────────────────────────────────────────
 

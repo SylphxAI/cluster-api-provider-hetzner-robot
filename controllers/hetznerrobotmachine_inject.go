@@ -163,46 +163,9 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 	})
 }
 
-// injectHostname sets machine.network.hostname in the Talos machineconfig.
-//
-// Format: <role>-<dc>-<serverID>
-//   - role: from HetznerRobotHost label "role" (e.g. "compute", "storage")
-//     Defaults to "compute" for control-plane and worker roles.
-//   - dc: Hetzner datacenter (e.g. "fsn1") — from HetznerRobotCluster.Spec.DC
-//   - serverID: Hetzner Robot server ID (immutable hardware identifier)
-//
-// Examples: "compute-fsn1-2938104", "storage-fsn1-2965124"
-func injectHostname(configData []byte, dc string, serverID int, hostRole string) ([]byte, error) {
-	if serverID == 0 {
-		return configData, nil
-	}
-
-	// Talos v1.12+: if CABPT already generated a HostnameConfig document,
-	// don't inject machine.network.hostname — the two conflict and Talos
-	// rejects "static hostname is already set in v1alpha1 config".
-	docs := splitYAMLDocuments(configData)
-	for _, doc := range docs {
-		if strings.Contains(string(doc), "kind: HostnameConfig") {
-			return configData, nil // CABPT handles hostname
-		}
-	}
-
-	if dc == "" {
-		dc = "fsn1"
-	}
-	prefix := "compute"
-	if hostRole == "storage" {
-		prefix = "storage"
-	}
-	hostname := fmt.Sprintf("%s-%s-%d", prefix, dc, serverID)
-
-	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
-		machine := ensureMap(config, "machine")
-		network := ensureMap(machine, "network")
-		network["hostname"] = hostname
-		return nil
-	})
-}
+// injectHostname removed — hostname is managed by CABPT via HostnameConfig
+// document (auto: stable). CAPHR injecting machine.network.hostname conflicted
+// with HostnameConfig, causing "static hostname is already set" errors.
 
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig and configures
 // static IPv4 routing on the parent NIC.
