@@ -71,7 +71,6 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	robotClient *robot.Client,
 	serverID int,
 	serverIP string,
-	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -268,7 +267,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	logger.Info("Talos image written, fixing EFI boot order post-install", "ip", serverIP)
 
 	// Fix EFI boot order after Talos install: delete ALL non-Talos, non-PXE
-	// entries (e.g. old Debian "UEFI OS"), then set Talos FIRST, PXE LAST.
+	// entries (e.g. old Debian "UEFI OS"), then set PXE FIRST, Talos SECOND
+	// (Hetzner standard — PXE first ensures rescue always works via one-shot).
 	// Some Hetzner BIOS firmwares ignore BootOrder and use their own NVMe
 	// boot priority — deleting competing entries is the only reliable fix.
 	if out, err := sshClient.Run(`
@@ -333,7 +333,6 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 	robotClient *robot.Client,
 	serverID int,
 	serverIP string,
-	machine *clusterv1.Machine,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 

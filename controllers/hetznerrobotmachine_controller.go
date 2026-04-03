@@ -300,11 +300,11 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		// This eliminates stale state issues (hostname conflicts, partial configs, etc.).
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
-		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP, machine)
+		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInRescue:
 		return r.stateInstallTalos(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInstalling:
-		return r.stateWaitInstall(ctx, hrm, hrc, robotClient, serverID, serverIP, machine)
+		return r.stateWaitInstall(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
