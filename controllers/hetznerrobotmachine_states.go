@@ -89,8 +89,10 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	logger := log.FromContext(ctx)
 
 	// Priority 1: Check Talos maintenance mode (UEFI NVMe-first boot order may skip rescue PXE).
-	if talos.IsInMaintenanceMode(ctx, serverIP) {
-		logger.Info("Talos maintenance mode detected, skipping rescue/install", "ip", serverIP)
+	// Only skip rescue if hardware info is available (from a previous rescue session).
+	// Without primaryMAC, config apply will fail — must go through rescue for DetectHardware.
+	if hrm.Status.PrimaryMAC != "" && talos.IsInMaintenanceMode(ctx, serverIP) {
+		logger.Info("Talos maintenance mode detected (hardware info available), skipping rescue/install", "ip", serverIP)
 		hrm.Status.ProvisioningState = infrav1.StateBootingTalos
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
