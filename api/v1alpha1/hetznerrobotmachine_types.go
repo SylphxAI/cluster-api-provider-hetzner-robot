@@ -115,9 +115,15 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
 
-	// RetryCount tracks consecutive transient reconciliation errors for the current state.
-	// Reset to 0 on success. Used for exponential backoff calculation.
-	// Only permanent errors (config issues, missing resources) enter terminal StateError.
+	// ProvisionStarted is set when provisioning begins (first reconcile in StateNone).
+	// Used for provision timeout: if provisioning doesn't complete within the timeout,
+	// the machine enters StateError → CAPI marks it Failed → MHC remediates.
+	// This ensures rolling updates are never blocked by a single stuck machine.
+	// +optional
+	ProvisionStarted *metav1.Time `json:"provisionStarted,omitempty"`
+
+	// RetryCount tracks consecutive transient reconciliation errors.
+	// Used for exponential backoff spacing between retries.
 	// +optional
 	RetryCount int `json:"retryCount,omitempty"`
 

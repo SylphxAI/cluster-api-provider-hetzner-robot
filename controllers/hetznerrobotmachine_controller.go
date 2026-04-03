@@ -28,6 +28,11 @@ const (
 	requeueAfterMedium = 20 * time.Second
 	requeueAfterLong   = 60 * time.Second
 
+	// provisionTimeout is the maximum time allowed for a machine to go from
+	// StateNone to StateProvisioned. If exceeded, the machine enters StateError
+	// and CAPI marks it as Failed → MachineHealthCheck remediates.
+	provisionTimeout = 30 * time.Minute
+
 	talosFactoryDefaultBaseURL = "https://factory.talos.dev"
 )
 
@@ -112,6 +117,31 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	if !controllerutil.ContainsFinalizer(hrm, infrav1.MachineFinalizer) {
 		controllerutil.AddFinalizer(hrm, infrav1.MachineFinalizer)
 		return ctrl.Result{}, nil
+	}
+
+	// Provision timeout: if provisioning doesn't complete within 30 minutes,
+	// enter terminal StateError. CAPI marks Machine as Failed → MHC remediates
+	// (deletes + recreates) → rolling update is never blocked by a stuck machine.
+	// Same pattern as cloud providers (CAPA, CAPZ, CAPG).
+	if hrm.Status.ProvisioningState != infrav1.StateProvisioned &&
+		hrm.Status.ProvisioningState != infrav1.StateError &&
+		hrm.Status.ProvisioningState != infrav1.StateDeleting {
+		if hrm.Status.ProvisionStarted == nil {
+			now := metav1.Now()
+			hrm.Status.ProvisionStarted = &now
+		} else if time.Since(hrm.Status.ProvisionStarted.Time) > provisionTimeout {
+			msg := fmt.Sprintf("Provision did not complete within %s (started %s, current state: %s)",
+				provisionTimeout, hrm.Status.ProvisionStarted.Time.Format(time.RFC3339), hrm.Status.ProvisioningState)
+			hrm.Status.FailureMessage = &msg
+			reason := "ProvisionTimeout"
+			hrm.Status.FailureReason = &reason
+			hrm.Status.ProvisioningState = infrav1.StateError
+			hrm.Status.Ready = false
+			logger.Error(nil, "Provision timeout exceeded, entering terminal StateError",
+				"timeout", provisionTimeout, "started", hrm.Status.ProvisionStarted.Time,
+				"state", hrm.Status.ProvisioningState)
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Enforce backoff: status patches trigger watch events that bypass RequeueAfter.

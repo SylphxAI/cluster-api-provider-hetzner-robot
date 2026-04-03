@@ -20,16 +20,11 @@ import (
 	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/talos"
 )
 
-// maxResetRetries is the maximum number of hw reset attempts before marking the machine
-// as failed. If rescue boot keeps failing (EFI boot order issue), the post-install
-// efibootmgr fix will prevent recurrence. For the initial case, an operator must
-// manually request a reset via Hetzner Robot panel.
-const maxResetRetries = 8
+// Provision timeout is handled by the controller (provisionTimeout constant).
+// No per-state retry limits — the global timeout covers all failure modes.
 
 // stateActivateRescue activates rescue mode via Robot API and triggers a hw reset.
-// After maxResetRetries failed attempts, marks the machine as failed (StateError).
-// An operator must then manually fix the server (e.g., Hetzner Robot panel manual reset)
-// and reset the Machine status to retry.
+// Provision timeout (in controller) handles the case where rescue never succeeds.
 func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
@@ -39,13 +34,6 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-
-	if hrm.Status.RetryCount > maxResetRetries {
-		logger.Info("Rescue boot failed after max retries — server needs manual intervention via Hetzner Robot panel",
-			"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
-		hrm.Status.ProvisioningState = infrav1.StateError
-		return ctrl.Result{}, nil
-	}
 
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
 	if err != nil {
@@ -146,15 +134,6 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		// is still mid-boot after a recent hw reset. No shortcuts — we always need
 		// rescue for a clean provision (wipe all + fresh install).
 		// In both cases, re-activate rescue and wipe.
-		hrm.Status.RetryCount++
-		now := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now
-		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Info("Rescue boot failed after max retries — server needs manual BIOS intervention (set PXE as first boot option)",
-				"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
-			hrm.Status.ProvisioningState = infrav1.StateError
-			return ctrl.Result{}, nil
-		}
 		if talos.IsUp(ctx, serverIP) {
 			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, wiping EFI + re-activating rescue",
 				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
@@ -179,15 +158,6 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		// Talos booted instead of PXE rescue (maintenance or full mode).
 		// No shortcuts — always wipe EFI and retry rescue for a clean provision.
 		// EFI boot order has Talos UKI before PXE — need to wipe EFI and retry.
-		hrm.Status.RetryCount++
-		now2 := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now2
-		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Info("Server keeps booting Talos instead of PXE rescue after max retries — needs manual BIOS intervention",
-				"serverID", serverID, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
-			hrm.Status.ProvisioningState = infrav1.StateError
-			return ctrl.Result{}, nil
-		}
 		// Wipe EFI boot entries via Talos API so PXE can boot next time.
 		// Try insecure (maintenance) first, then authenticated (full mode with mTLS).
 		logger.Info("Attempting to wipe EFI partition via Talos API to allow PXE boot",
@@ -279,15 +249,6 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	if !isRescue {
 		// Server is running a normal OS, not rescue. Re-activate rescue + hw reset.
-		hrm.Status.RetryCount++
-		now := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now
-		if hrm.Status.RetryCount > maxResetRetries {
-			logger.Info("Server keeps booting normal OS instead of rescue after max retries — EFI boot order needs manual intervention via Hetzner Robot panel",
-				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount, "action", "manual_intervention_required")
-			hrm.Status.ProvisioningState = infrav1.StateError
-			return ctrl.Result{}, nil
-		}
 		logger.Info("Server running normal OS instead of rescue, re-activating rescue and triggering hw reset",
 			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
