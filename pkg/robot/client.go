@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const robotBaseURL = "https://robot-ws.your-server.de"
+const robotBaseURL = "https://robot.hetzner.com"
 
 // Client is the Hetzner Robot API client.
 type Client struct {
