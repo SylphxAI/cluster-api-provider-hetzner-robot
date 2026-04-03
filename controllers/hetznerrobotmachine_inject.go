@@ -219,9 +219,13 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		machine := ensureMap(config, "machine")
 		network := ensureMap(machine, "network")
 
-		// Build the VLAN entry
+		// Build the VLAN entry.
+		// MTU 1400 is required by Hetzner vSwitch — default 1500 + 4-byte VLAN tag
+		// header = 1504, exceeding the vSwitch underlying MTU. Large packets would
+		// be silently dropped (TCP small packets work, large transfers break).
 		vlanEntry := map[string]interface{}{
 			"vlanId": vlanCfg.ID,
+			"mtu":    1400,
 			"addresses": []interface{}{
 				fmt.Sprintf("%s/%d", internalIP, prefixLen),
 			},

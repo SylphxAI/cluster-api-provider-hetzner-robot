@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -94,27 +93,10 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 					return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 				}
 				// SSH reachable but NOT rescue — server booted existing OS.
-				// Fix EFI boot order to PXE first, then reboot into rescue.
-				logger.Info("SSH reachable but not rescue (existing OS detected), fixing EFI boot order",
+				// With PXE-first boot order (set post-install), re-activating rescue
+				// + hw reset is sufficient — PXE will boot rescue on next reboot.
+				logger.Info("SSH reachable but not rescue (existing OS detected), will re-activate rescue",
 					"ip", serverIP)
-				efiOut, efiErr := client.Run(`
-					if command -v efibootmgr > /dev/null 2>&1; then
-						mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
-						mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
-						for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
-							efibootmgr -b "$entry" -B 2>/dev/null
-						done
-					fi
-					nohup bash -c 'sleep 1 && reboot' &>/dev/null &
-				`)
-				if efiErr != nil {
-					logger.Info("EFI boot order fix via SSH failed (non-fatal, will retry via rescue)",
-						"error", efiErr, "output", efiOut, "ip", serverIP)
-				} else {
-					logger.Info("Rebooted existing OS with PXE-only EFI, should enter rescue on next boot",
-						"output", efiOut, "ip", serverIP)
-				}
-				return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
 			}
 		}
 		// SSH reachable but can't authenticate — might be rescue with wrong key or existing OS
@@ -135,11 +117,10 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 		// rescue for a clean provision (wipe all + fresh install).
 		// In both cases, re-activate rescue and wipe.
 		if talos.IsUp(ctx, serverIP) {
-			logger.Info("Talos running in full mode during early provisioning — treating as stale OS, wiping EFI + re-activating rescue",
-				"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
-			// Wipe EFI so PXE can boot on next reset. Try insecure first (maintenance),
-			// then authenticated (full mode with mTLS from bootstrap data).
-			r.attemptEFIWipe(ctx, serverIP, machine)
+			// Talos booted instead of rescue. With PXE-first boot order, re-activating
+			// rescue + hw reset is sufficient — PXE will load rescue on next boot.
+			logger.Info("Talos detected during early provisioning — re-activating rescue",
+				"serverID", serverID, "ip", serverIP)
 			return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 		}
 		// Nothing reachable and rescue inactive. Most likely: server is still booting
@@ -155,64 +136,17 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 	// Edge case: UEFI/BIOS boot order may skip PXE and boot Talos from NVMe instead
 	// of the rescue system. Detect this by checking if Talos is already up.
 	if talos.IsUp(ctx, serverIP) {
-		// Talos booted instead of PXE rescue (maintenance or full mode).
-		// No shortcuts — always wipe EFI and retry rescue for a clean provision.
-		// EFI boot order has Talos UKI before PXE — need to wipe EFI and retry.
-		// Wipe EFI boot entries via Talos API so PXE can boot next time.
-		// Try insecure (maintenance) first, then authenticated (full mode with mTLS).
-		logger.Info("Attempting to wipe EFI partition via Talos API to allow PXE boot",
-			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
-		r.attemptEFIWipe(ctx, serverIP, machine)
-		logger.Info("Rescue active but Talos booted from disk instead of PXE rescue — re-activating rescue",
-			"serverID", serverID, "ip", serverIP, "retryCount", hrm.Status.RetryCount)
+		// Talos booted from disk instead of PXE rescue. With PXE-first boot order,
+		// this means the post-install EFI fix hasn't been applied yet (first provision)
+		// or BIOS firmware is non-compliant. Re-activate rescue + hw reset.
+		logger.Info("Rescue active but Talos booted from disk — re-activating rescue",
+			"serverID", serverID, "ip", serverIP)
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
 	// Neither SSH (rescue) nor Talos (disk) is up — server is still booting.
 	logger.Info("Rescue active, SSH not yet reachable, waiting", "ip", serverIP)
 	return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
-}
-
-// attemptEFIWipe tries to wipe EFI + STATE partitions via the Talos API.
-// First tries the insecure maintenance API (no client cert). If that fails
-// (node is in full mode, not maintenance), falls back to an authenticated
-// connection using the admin TLS credentials from the Machine's bootstrap data.
-// Best-effort: logs failures but never returns an error — the caller retries
-// on next reconcile cycle via rescue re-activation + hardware reset.
-func (r *HetznerRobotMachineReconciler) attemptEFIWipe(
-	ctx context.Context,
-	serverIP string,
-	machine *clusterv1.Machine,
-) {
-	logger := log.FromContext(ctx)
-
-	// Try insecure wipe first (works if node is in maintenance mode).
-	if err := talos.WipeEFIPartition(ctx, serverIP); err == nil {
-		logger.Info("Successfully wiped EFI via Talos maintenance API — PXE should boot on next reset",
-			"ip", serverIP)
-		return
-	}
-
-	// Insecure wipe failed — node is likely in full mode (requires mTLS).
-	// Fall back to authenticated wipe using bootstrap data.
-	if machine == nil {
-		logger.Info("EFI wipe failed: maintenance API rejected and no Machine available for authenticated fallback",
-			"ip", serverIP, "outcome", "will_retry")
-		return
-	}
-	machineConfigData, err := r.getBootstrapData(ctx, machine)
-	if err != nil {
-		logger.Info("EFI wipe failed: cannot get bootstrap data for authenticated fallback",
-			"error", err, "ip", serverIP, "outcome", "will_retry")
-		return
-	}
-	if err := talos.WipeEFIPartitionAuthenticated(ctx, serverIP, machineConfigData); err != nil {
-		logger.Info("EFI wipe failed: both maintenance and authenticated attempts unsuccessful",
-			"error", err, "ip", serverIP, "outcome", "will_retry")
-		return
-	}
-	logger.Info("Successfully wiped EFI via authenticated Talos API — PXE should boot on next reset",
-		"ip", serverIP)
 }
 
 // stateInstallTalos SSHes into rescue and installs Talos.
@@ -352,11 +286,15 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 				efibootmgr -b "$entry" -B 2>/dev/null || true
 			done
 
-			# Set boot order: Talos first, PXE last
+			# Set boot order: PXE first, Talos second (Hetzner standard).
+			# PXE first ensures rescue always works (one-shot: if rescue active → boot
+			# rescue; if not → PXE silently fails → falls through to Talos).
 			TALOS_NUM=$(efibootmgr | grep -i 'Talos' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
 			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			if [ -n "$TALOS_NUM" ] && [ -n "$PXE_NUMS" ]; then
-				efibootmgr -o "${TALOS_NUM},${PXE_NUMS}" 2>&1
+			if [ -n "$PXE_NUMS" ] && [ -n "$TALOS_NUM" ]; then
+				efibootmgr -o "${PXE_NUMS},${TALOS_NUM}" 2>&1
+			elif [ -n "$PXE_NUMS" ]; then
+				efibootmgr -o "${PXE_NUMS}" 2>&1
 			elif [ -n "$TALOS_NUM" ]; then
 				efibootmgr -o "${TALOS_NUM}" 2>&1
 			fi
@@ -408,14 +346,11 @@ func (r *HetznerRobotMachineReconciler) stateWaitInstall(
 
 	// Edge case: if Talos is up but NOT in maintenance mode, the dd install
 	// didn't fully wipe the STATE partition — old config persisted and Talos
-	// booted in full mode. Wipe EFI + re-activate rescue to wipe and reinstall.
+	// booted in full mode. Re-activate rescue. PXE-first boot order ensures
+	// rescue loads on next hw reset.
 	if talos.IsUp(ctx, serverIP) {
-		logger.Info("Talos booted in full mode after install (old config persisted) — wiping EFI + re-activating rescue to reinstall",
+		logger.Info("Talos booted in full mode after install (old config persisted) — re-activating rescue",
 			"serverID", serverID, "ip", serverIP)
-		r.attemptEFIWipe(ctx, serverIP, machine)
-		hrm.Status.RetryCount++
-		now := metav1.Now()
-		hrm.Status.LastRetryTimestamp = &now
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	}
 
