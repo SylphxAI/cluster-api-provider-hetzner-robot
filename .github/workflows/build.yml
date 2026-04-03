@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 jobs:
   build:
-    runs-on: [self-hosted, sylphx, linux, standard]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
