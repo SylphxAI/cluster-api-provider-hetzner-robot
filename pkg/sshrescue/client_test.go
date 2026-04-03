@@ -494,7 +494,7 @@ func TestInstallTalos_RawImageURLTrailingSlash(t *testing.T) {
 
 func TestInstallTalos_RequiresConnection(t *testing.T) {
 	c := New("127.0.0.1", []byte("key"))
-	err := c.InstallTalos("https://factory.talos.dev", "abc", "v1.0.0", "/dev/sda")
+	err := c.InstallTalos("https://factory.talos.dev", "abc", "v1.0.0", "/dev/sda", "")
 	if err == nil {
 		t.Fatal("expected error when calling InstallTalos without connection")
 	}
@@ -505,7 +505,7 @@ func TestInstallTalos_RequiresConnection(t *testing.T) {
 
 func TestInstallTalos_ErrorMessageContainsDiskContext(t *testing.T) {
 	c := New("127.0.0.1", []byte("key"))
-	err := c.InstallTalos("https://factory.talos.dev", "abc", "v1.0.0", "/dev/sda")
+	err := c.InstallTalos("https://factory.talos.dev", "abc", "v1.0.0", "/dev/sda", "")
 	if err == nil {
 		t.Fatal("expected error")
 	}

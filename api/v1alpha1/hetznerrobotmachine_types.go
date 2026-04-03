@@ -57,6 +57,13 @@ type HetznerRobotMachineSpec struct {
 	// +kubebuilder:default="/dev/nvme0n1"
 	InstallDisk string `json:"installDisk,omitempty"`
 
+	// CustomImageURL, if set, overrides the Talos Factory image URL.
+	// Used for custom Talos images with baked-in extensions (e.g. devmapper-pool).
+	// The URL must point to a raw metal image (zstd or xz compressed).
+	// Example: "https://github.com/SylphxAI/talos-images/releases/download/v1.12.6/metal-amd64.raw.zst"
+	// +optional
+	CustomImageURL string `json:"customImageURL,omitempty"`
+
 	// EphemeralSize, if set, limits the Talos EPHEMERAL partition (/var) to this size
 	// and creates a raw data partition ("osd-data") with the remaining disk space.
 	// Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.

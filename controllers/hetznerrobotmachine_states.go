@@ -271,6 +271,7 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 		hrm.Spec.TalosSchematic,
 		hrm.Spec.TalosVersion,
 		installDisk,
+		hrm.Spec.CustomImageURL,
 	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("install Talos on %s: %w", serverIP, err)
 	}

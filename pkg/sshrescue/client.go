@@ -297,19 +297,31 @@ func (c *Client) WipeAllDisks(disks []string) (string, error) {
 // Flow:
 //  1. Download + write raw image via curl | xzcat | dd (single pipeline)
 //  2. Caller handles EFI boot order via efibootmgr (not this function's job)
-func (c *Client) InstallTalos(factoryURL, schematic, version, disk string) error {
-	// Talos Factory raw image URL:
-	// https://factory.talos.dev/image/{schematic}/{version}/metal-amd64.raw.xz
-	imageURL := fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
-		strings.TrimRight(factoryURL, "/"), schematic, version)
+func (c *Client) InstallTalos(factoryURL, schematic, version, disk, customImageURL string) error {
+	var imageURL, decompressCmd string
+
+	if customImageURL != "" {
+		// Custom image URL — supports both .zst and .xz
+		imageURL = customImageURL
+		if strings.HasSuffix(imageURL, ".zst") {
+			decompressCmd = "zstdcat"
+		} else {
+			decompressCmd = "xzcat"
+		}
+	} else {
+		// Talos Factory raw image URL:
+		// https://factory.talos.dev/image/{schematic}/{version}/metal-amd64.raw.xz
+		imageURL = fmt.Sprintf("%s/image/%s/%s/metal-amd64.raw.xz",
+			strings.TrimRight(factoryURL, "/"), schematic, version)
+		decompressCmd = "xzcat"
+	}
 
 	// Single pipeline: download compressed image → decompress → write to disk.
-	// xzcat streams decompression (no temp file needed, rescue has limited RAM).
 	// dd uses 4M block size for optimal NVMe throughput.
 	// conv=notrunc prevents dd from truncating the device node.
 	installCmd := fmt.Sprintf(
-		"curl -fsSL %q | xzcat | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
-		imageURL, disk,
+		"curl -fsSL %q | %s | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
+		imageURL, decompressCmd, disk,
 	)
 	if out, err := c.Run(installCmd); err != nil {
 		return fmt.Errorf("write raw image to %s: %w\nOutput: %s", disk, err, out)
