@@ -266,39 +266,9 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 	})
 }
 
-// injectSecretboxEncryptionSecret replaces cluster.secretboxEncryptionSecret in the
-// machineconfig YAML. CAPT may generate a different encryption key per Machine, but all
-// CP nodes must use the same key to decrypt secrets in shared etcd. This function ensures
-// the correct cluster-wide key is used.
-func injectSecretboxEncryptionSecret(configData []byte, secret string) ([]byte, error) {
-	if secret == "" {
-		return configData, nil
-	}
-
-	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
-		cluster := ensureMap(config, "cluster")
-		cluster["secretboxEncryptionSecret"] = secret
-		return nil
-	})
-}
-
-// injectServiceAccountKey overrides cluster.serviceAccount.key in the Talos machineconfig.
-// CABPT generates a unique SA key per Machine, but all CP nodes sharing etcd must use the
-// same key — otherwise API servers can't validate tokens signed by other CP nodes.
-// Workers are unaffected (they don't run kube-apiserver), but injecting consistently
-// ensures correctness if a worker is later promoted.
-func injectServiceAccountKey(configData []byte, saKey string) ([]byte, error) {
-	if saKey == "" {
-		return configData, nil
-	}
-
-	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
-		cluster := ensureMap(config, "cluster")
-		sa := ensureMap(cluster, "serviceAccount")
-		sa["key"] = saKey
-		return nil
-	})
-}
+// injectSecretboxEncryptionSecret + injectServiceAccountKey removed.
+// Verified: CABPT/CACPPT already shares the same keys across all CP nodes.
+// CAPHR's previous injection was redundant (overwriting identical values).
 
 // injectProviderID sets machine.kubelet.extraArgs["provider-id"] in the Talos
 // machineconfig. This causes kubelet to register the Node with the correct providerID,

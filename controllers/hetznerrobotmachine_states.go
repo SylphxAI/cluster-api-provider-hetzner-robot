@@ -499,34 +499,9 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"mac", primaryMAC)
 	}
 
-	// Inject cluster-level secrets from the Talos secret bundle.
-	// CABPT generates unique keys per Machine, but all CP nodes sharing etcd must
-	// use the same keys. Without this:
-	// - Different secretboxEncryptionSecret → new CP nodes can't decrypt existing K8s secrets
-	// - Different serviceAccount.key → API servers can't validate tokens signed by other CP nodes
-	if hrc.Spec.TalosSecretRef != nil {
-		bundle, err := r.getTalosSecretBundle(ctx, hrc)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("get talos secret bundle: %w", err)
-		}
-		if bundle != nil {
-			if s := bundle.Secrets.SecretboxEncryptionSecret; s != "" {
-				bootstrapData, err = injectSecretboxEncryptionSecret(bootstrapData, s)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("inject secretbox encryption secret: %w", err)
-				}
-				logger.Info("Injected secretboxEncryptionSecret from cluster talos secret")
-			}
-
-			if s := bundle.Secrets.K8sServiceAccount.Key; s != "" {
-				bootstrapData, err = injectServiceAccountKey(bootstrapData, s)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("inject service account key: %w", err)
-				}
-				logger.Info("Injected serviceAccount.key from cluster talos secret")
-			}
-		}
-	}
+	// Cluster-level secrets (secretboxEncryptionSecret, serviceAccount.key):
+	// Verified that CABPT/CACPPT already shares the same keys across all CP nodes.
+	// No injection needed — CAPHR's previous override was redundant.
 
 	// Inject providerID into kubelet extraArgs so the Node registers with the
 	// correct providerID. Without this, CAPI can't match Machine → Node and the

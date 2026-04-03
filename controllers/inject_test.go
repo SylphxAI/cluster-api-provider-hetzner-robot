@@ -175,10 +175,6 @@ provisioning:
 		t.Fatalf("injectInstallDisk: %v", err)
 	}
 	// injectHostname removed — hostname managed by CABPT HostnameConfig
-	data, err = injectSecretboxEncryptionSecret(data, "SECRET_KEY")
-	if err != nil {
-		t.Fatalf("injectSecretboxEncryptionSecret: %v", err)
-	}
 	data, err = injectProviderID(data, "hetzner-robot://2938104")
 	if err != nil {
 		t.Fatalf("injectProviderID: %v", err)
@@ -191,9 +187,6 @@ provisioning:
 		t.Error("install disk missing from first document")
 	}
 	// hostname no longer injected by CAPHR — managed by CABPT HostnameConfig
-	if !strings.Contains(resultStr, "secretboxEncryptionSecret: SECRET_KEY") {
-		t.Error("secretbox key missing from first document")
-	}
 	if !strings.Contains(resultStr, "provider-id: hetzner-robot://2938104") {
 		t.Error("provider-id missing from first document")
 	}
@@ -441,154 +434,6 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 	vlans := iface["vlans"].([]interface{})
 	if len(vlans) != 1 {
 		t.Fatalf("expected 1 vlan, got %d", len(vlans))
-	}
-}
-
-func TestInjectSecretboxEncryptionSecret(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-cluster:
-  clusterName: test
-  secretboxEncryptionSecret: WRONG_KEY_FROM_CAPT
-`)
-	result, err := injectSecretboxEncryptionSecret(input, "CORRECT_CLUSTER_KEY")
-	if err != nil {
-		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	cluster := config["cluster"].(map[string]interface{})
-	if cluster["secretboxEncryptionSecret"] != "CORRECT_CLUSTER_KEY" {
-		t.Errorf("expected CORRECT_CLUSTER_KEY, got %v", cluster["secretboxEncryptionSecret"])
-	}
-	// Verify other cluster fields are preserved
-	if cluster["clusterName"] != "test" {
-		t.Errorf("clusterName was not preserved, got %v", cluster["clusterName"])
-	}
-}
-
-func TestInjectSecretboxEncryptionSecret_Empty(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-cluster:
-  clusterName: test
-`)
-	result, err := injectSecretboxEncryptionSecret(input, "")
-	if err != nil {
-		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
-	}
-	if string(result) != string(input) {
-		t.Error("empty secret should return input unchanged")
-	}
-}
-
-func TestInjectSecretboxEncryptionSecret_NoCluster(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-`)
-	result, err := injectSecretboxEncryptionSecret(input, "SOME_KEY")
-	if err != nil {
-		t.Fatalf("injectSecretboxEncryptionSecret failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	cluster := config["cluster"].(map[string]interface{})
-	if cluster["secretboxEncryptionSecret"] != "SOME_KEY" {
-		t.Errorf("expected SOME_KEY, got %v", cluster["secretboxEncryptionSecret"])
-	}
-}
-
-func TestInjectServiceAccountKey(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-cluster:
-  clusterName: test
-  serviceAccount:
-    key: WRONG_KEY_FROM_CAPT
-`)
-	result, err := injectServiceAccountKey(input, "CORRECT_CLUSTER_SA_KEY")
-	if err != nil {
-		t.Fatalf("injectServiceAccountKey failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	cluster := config["cluster"].(map[string]interface{})
-	sa := cluster["serviceAccount"].(map[string]interface{})
-	if sa["key"] != "CORRECT_CLUSTER_SA_KEY" {
-		t.Errorf("expected CORRECT_CLUSTER_SA_KEY, got %v", sa["key"])
-	}
-	// Verify other cluster fields are preserved
-	if cluster["clusterName"] != "test" {
-		t.Errorf("clusterName was not preserved, got %v", cluster["clusterName"])
-	}
-}
-
-func TestInjectServiceAccountKey_Empty(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-cluster:
-  clusterName: test
-`)
-	result, err := injectServiceAccountKey(input, "")
-	if err != nil {
-		t.Fatalf("injectServiceAccountKey failed: %v", err)
-	}
-	if string(result) != string(input) {
-		t.Error("empty SA key should return input unchanged")
-	}
-}
-
-func TestInjectServiceAccountKey_NoCluster(t *testing.T) {
-	input := []byte(`machine:
-  type: controlplane
-`)
-	result, err := injectServiceAccountKey(input, "SOME_SA_KEY")
-	if err != nil {
-		t.Fatalf("injectServiceAccountKey failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	cluster := config["cluster"].(map[string]interface{})
-	sa := cluster["serviceAccount"].(map[string]interface{})
-	if sa["key"] != "SOME_SA_KEY" {
-		t.Errorf("expected SOME_SA_KEY, got %v", sa["key"])
-	}
-}
-
-func TestInjectServiceAccountKey_NoServiceAccount(t *testing.T) {
-	input := []byte(`cluster:
-  clusterName: test
-`)
-	result, err := injectServiceAccountKey(input, "SA_KEY_123")
-	if err != nil {
-		t.Fatalf("injectServiceAccountKey failed: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
-	}
-
-	cluster := config["cluster"].(map[string]interface{})
-	sa := cluster["serviceAccount"].(map[string]interface{})
-	if sa["key"] != "SA_KEY_123" {
-		t.Errorf("expected SA_KEY_123, got %v", sa["key"])
 	}
 }
 
