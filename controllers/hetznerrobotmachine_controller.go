@@ -291,7 +291,9 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	hrm.Status.Addresses = []clusterv1.MachineAddress{
 		{Type: clusterv1.MachineExternalIP, Address: serverIP},
 	}
-	if hrh.Spec.InternalIP != "" {
+	if hrh.Spec.InternalIP != "" && hrc.Spec.VLANConfig != nil {
+		// Only report InternalIP when VLAN is configured — the IP is only
+		// reachable when the VLAN interface is actually injected into machineconfig.
 		hrm.Status.Addresses = append(hrm.Status.Addresses,
 			clusterv1.MachineAddress{Type: clusterv1.MachineInternalIP, Address: hrh.Spec.InternalIP})
 	}

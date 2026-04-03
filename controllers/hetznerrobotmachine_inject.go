@@ -145,20 +145,6 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		sysctls := ensureMap(machine, "sysctls")
 		sysctls["net.ipv6.conf.all.forwarding"] = "1"
 
-		// Set kubelet nodeIP for dual-stack: IPv4 (VLAN) + IPv6.
-		// Without this, kubelet only advertises the IPv4 address and K8s
-		// doesn't know the node has IPv6 connectivity.
-		kubelet := ensureMap(machine, "kubelet")
-		extraArgs := ensureMap(kubelet, "extraArgs")
-		// Kubelet dual-stack nodeIP: VLAN IPv4 + public IPv6.
-		// Both are needed for K8s to advertise the node as dual-stack.
-		nodeIPv6 := strings.TrimSuffix(ipv6Prefix, "::") + "::1" // e.g. 2a01:4f8:2210:1a2e::1
-		if internalIP != "" {
-			extraArgs["node-ip"] = internalIP + "," + nodeIPv6
-		} else {
-			extraArgs["node-ip"] = nodeIPv6
-		}
-
 		return nil
 	})
 }
@@ -166,6 +152,49 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 // injectHostname removed — hostname is managed by CABPT via HostnameConfig
 // document (auto: stable). CAPHR injecting machine.network.hostname conflicted
 // with HostnameConfig, causing "static hostname is already set" errors.
+
+// injectKubeletNodeIP sets machine.kubelet.extraArgs["node-ip"] so kubelet
+// advertises the correct address(es) to the Kubernetes API server.
+//
+// Without this, kubelet uses the default route's IP — which on Hetzner is the
+// public IPv4. Internal VLAN traffic would route over the public internet instead
+// of the private vSwitch network. Same problem as providerID: bare metal has no
+// CCM to auto-detect the right IPs; CABPT templates don't know per-server IPs.
+//
+// Cases:
+//   - VLAN + IPv6: node-ip = internalIP,ipv6 (dual-stack)
+//   - VLAN only:   node-ip = internalIP (single-stack, private network)
+//   - IPv6 only:   node-ip = ipv6 (single-stack IPv6)
+//   - Neither:     no injection (kubelet auto-detects)
+func injectKubeletNodeIP(configData []byte, internalIP string, ipv6Net string) ([]byte, error) {
+	// Derive IPv6 node address from the /64 subnet.
+	var nodeIPv6 string
+	if ipv6Net != "" {
+		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
+		nodeIPv6 = strings.TrimSuffix(ipv6Prefix, "::") + "::1"
+	}
+
+	// Build the node-ip value.
+	var nodeIP string
+	switch {
+	case internalIP != "" && nodeIPv6 != "":
+		nodeIP = internalIP + "," + nodeIPv6 // dual-stack
+	case internalIP != "":
+		nodeIP = internalIP // VLAN only
+	case nodeIPv6 != "":
+		nodeIP = nodeIPv6 // IPv6 only
+	default:
+		return configData, nil // no injection needed
+	}
+
+	return modifyFirstDocument(configData, func(config map[string]interface{}) error {
+		machine := ensureMap(config, "machine")
+		kubelet := ensureMap(machine, "kubelet")
+		extraArgs := ensureMap(kubelet, "extraArgs")
+		extraArgs["node-ip"] = nodeIP
+		return nil
+	})
+}
 
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig and configures
 // static IPv4 routing on the parent NIC.

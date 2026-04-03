@@ -928,51 +928,81 @@ func TestInjectIPv6Config_WithSlash64Suffix(t *testing.T) {
 	}
 }
 
-func TestInjectIPv6Config_WithInternalIP_DualStackNodeIP(t *testing.T) {
-	// When internalIP is provided, kubelet should get dual-stack node-ip: "IPv4,IPv6"
+// ─── injectKubeletNodeIP ───────────────────────────────────────────────────
+
+func TestInjectKubeletNodeIP_DualStack(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "10.10.0.5")
+	result, err := injectKubeletNodeIP(input, "10.10.0.5", "2a01:4f8:271:3b49::/64")
 	if err != nil {
-		t.Fatalf("injectIPv6Config failed: %v", err)
+		t.Fatalf("injectKubeletNodeIP failed: %v", err)
 	}
-
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
+		t.Fatalf("unmarshal: %v", err)
 	}
-
 	machine := config["machine"].(map[string]interface{})
 	kubelet := machine["kubelet"].(map[string]interface{})
 	extraArgs := kubelet["extraArgs"].(map[string]interface{})
 	nodeIP := extraArgs["node-ip"].(string)
 	if nodeIP != "10.10.0.5,2a01:4f8:271:3b49::1" {
-		t.Errorf("expected dual-stack node-ip '10.10.0.5,2a01:4f8:271:3b49::1', got %q", nodeIP)
+		t.Errorf("expected dual-stack '10.10.0.5,2a01:4f8:271:3b49::1', got %q", nodeIP)
 	}
 }
 
-func TestInjectIPv6Config_WithoutInternalIP_IPv6OnlyNodeIP(t *testing.T) {
-	// When internalIP is empty, kubelet should get IPv6-only node-ip
+func TestInjectKubeletNodeIP_VLANOnly(t *testing.T) {
 	input := []byte(`machine:
   type: controlplane
 `)
-	result, err := injectIPv6Config(input, "2a01:4f8:271:3b49::", "aa:bb:cc:dd:ee:ff", "")
+	result, err := injectKubeletNodeIP(input, "10.10.0.5", "")
 	if err != nil {
-		t.Fatalf("injectIPv6Config failed: %v", err)
+		t.Fatalf("injectKubeletNodeIP failed: %v", err)
 	}
-
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(result, &config); err != nil {
-		t.Fatalf("unmarshal result: %v", err)
+		t.Fatalf("unmarshal: %v", err)
 	}
+	machine := config["machine"].(map[string]interface{})
+	kubelet := machine["kubelet"].(map[string]interface{})
+	extraArgs := kubelet["extraArgs"].(map[string]interface{})
+	nodeIP := extraArgs["node-ip"].(string)
+	if nodeIP != "10.10.0.5" {
+		t.Errorf("expected VLAN-only '10.10.0.5', got %q", nodeIP)
+	}
+}
 
+func TestInjectKubeletNodeIP_IPv6Only(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectKubeletNodeIP(input, "", "2a01:4f8:271:3b49::/64")
+	if err != nil {
+		t.Fatalf("injectKubeletNodeIP failed: %v", err)
+	}
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	machine := config["machine"].(map[string]interface{})
 	kubelet := machine["kubelet"].(map[string]interface{})
 	extraArgs := kubelet["extraArgs"].(map[string]interface{})
 	nodeIP := extraArgs["node-ip"].(string)
 	if nodeIP != "2a01:4f8:271:3b49::1" {
-		t.Errorf("expected IPv6-only node-ip '2a01:4f8:271:3b49::1', got %q", nodeIP)
+		t.Errorf("expected IPv6-only '2a01:4f8:271:3b49::1', got %q", nodeIP)
+	}
+}
+
+func TestInjectKubeletNodeIP_Neither_NoOp(t *testing.T) {
+	input := []byte(`machine:
+  type: controlplane
+`)
+	result, err := injectKubeletNodeIP(input, "", "")
+	if err != nil {
+		t.Fatalf("injectKubeletNodeIP failed: %v", err)
+	}
+	if string(result) != string(input) {
+		t.Error("expected no-op when neither internalIP nor IPv6 is set")
 	}
 }
 

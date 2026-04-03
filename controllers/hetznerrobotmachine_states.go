@@ -500,9 +500,19 @@ func (r *HetznerRobotMachineReconciler) stateApplyConfig(
 			"mac", primaryMAC)
 	}
 
-	// Cluster-level secrets (secretboxEncryptionSecret, serviceAccount.key):
-	// Verified that CABPT/CACPPT already shares the same keys across all CP nodes.
-	// No injection needed — CAPHR's previous override was redundant.
+	// Set kubelet nodeIP so K8s internal traffic uses the correct addresses.
+	// Without this, kubelet advertises the public IP — VLAN traffic would route
+	// over the internet instead of the private vSwitch network.
+	{
+		internalIP := hrh.Spec.InternalIP
+		if hrc.Spec.VLANConfig == nil {
+			internalIP = "" // only use internalIP when VLAN is configured
+		}
+		bootstrapData, err = injectKubeletNodeIP(bootstrapData, internalIP, hrh.Spec.ServerIPv6Net)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("inject kubelet nodeIP: %w", err)
+		}
+	}
 
 	// Inject providerID into kubelet extraArgs so the Node registers with the
 	// correct providerID. Without this, CAPI can't match Machine → Node and the
