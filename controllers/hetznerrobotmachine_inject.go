@@ -177,10 +177,19 @@ func injectHostname(configData []byte, dc string, serverID int, hostRole string)
 		return configData, nil
 	}
 
+	// Talos v1.12+: if CABPT already generated a HostnameConfig document,
+	// don't inject machine.network.hostname — the two conflict and Talos
+	// rejects "static hostname is already set in v1alpha1 config".
+	docs := splitYAMLDocuments(configData)
+	for _, doc := range docs {
+		if strings.Contains(string(doc), "kind: HostnameConfig") {
+			return configData, nil // CABPT handles hostname
+		}
+	}
+
 	if dc == "" {
 		dc = "fsn1"
 	}
-	// Map host role label to hostname prefix
 	prefix := "compute"
 	if hostRole == "storage" {
 		prefix = "storage"
