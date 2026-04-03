@@ -86,9 +86,9 @@ func IsInMaintenanceMode(ctx context.Context, ip string) bool {
 }
 
 // WipeEFIPartition connects to a Talos node in maintenance mode and wipes
-// the EFI partition (nvme0n1p1) so that PXE rescue can boot on next reset.
-// This is needed when reprovisioning a node that already has Talos installed —
-// the UKI boot entry in EFI takes priority over PXE.
+// all system partitions so that PXE rescue can boot on next reset.
+// Uses Mode=SYSTEM_DISK to wipe all partitions regardless of label names —
+// avoids Talos v1.12 errors where specific labels (EFI, BIOS) may not exist.
 func WipeEFIPartition(ctx context.Context, ip string) error {
 	wipeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -100,20 +100,13 @@ func WipeEFIPartition(ctx context.Context, ip string) error {
 	defer conn.Close() //nolint:errcheck
 
 	client := machinepb.NewMachineServiceClient(conn)
-
-	// Reset with EFI + STATE wipe — this removes the Talos UKI boot entry
-	// and clears the STATE partition so Talos can't boot from disk.
 	_, err = client.Reset(wipeCtx, &machinepb.ResetRequest{
 		Graceful: false,
 		Reboot:   true,
-		SystemPartitionsToWipe: []*machinepb.ResetPartitionSpec{
-			{Label: "EFI"},
-			{Label: "BIOS"},
-			{Label: "STATE"},
-		},
+		Mode:     machinepb.ResetRequest_SYSTEM_DISK,
 	})
 	if err != nil {
-		return fmt.Errorf("reset with EFI wipe on %s: %w", ip, err)
+		return fmt.Errorf("reset with system disk wipe on %s: %w", ip, err)
 	}
 	return nil
 }
