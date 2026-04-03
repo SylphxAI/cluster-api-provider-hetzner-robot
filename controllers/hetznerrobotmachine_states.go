@@ -462,7 +462,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	sshClient.Run("reboot") //nolint:errcheck // reboot disconnects SSH, error expected
 
 	hrm.Status.ProvisioningState = infrav1.StateInstalling
-	return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+	// Raw dd install is fast (~30s). Talos reboots in 60-90s. First check at 90s.
+	return ctrl.Result{RequeueAfter: 90 * time.Second}, nil
 }
 
 // stateWaitInstall transitions to BootingTalos after giving install time to complete.
