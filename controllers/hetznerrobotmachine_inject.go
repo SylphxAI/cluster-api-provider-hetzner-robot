@@ -175,12 +175,20 @@ func injectKubeletNodeIP(configData []byte, internalIP string, ipv6Net string) (
 
 // injectVLANConfig adds a VLAN interface to the Talos machineconfig.
 //
-// Uses deviceSelector by MAC address for parent NIC identification.
-// Parent NIC uses DHCP for public IP (matches proven working config on existing nodes).
-// VLAN gets a static address from HetznerRobotHost.Spec.InternalIP.
+// Creates a DEDICATED interface entry with deviceSelector by MAC address.
+// This ensures VLAN is only created on the PRIMARY NIC (the one connected to
+// the Hetzner vSwitch), not on all physical NICs. Servers with dual-port NICs
+// would otherwise get VLAN on both ports via `deviceSelector: {physical: true}`,
+// causing duplicate IPs and Cilium BPF routing confusion.
+//
+// The template's DHCP entry uses `deviceSelector: {physical: true}` for public IP
+// on all NICs. The VLAN entry here uses the primary MAC for single-NIC targeting.
 func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string, serverIP string, gatewayIP string) ([]byte, error) {
 	if vlanCfg == nil || internalIP == "" {
 		return configData, nil
+	}
+	if primaryMAC == "" {
+		return configData, fmt.Errorf("primaryMAC required for VLAN injection — detected during rescue")
 	}
 
 	prefixLen := vlanCfg.PrefixLength
@@ -192,73 +200,35 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		machine := ensureMap(config, "machine")
 		network := ensureMap(machine, "network")
 
-		// VLAN entry with static internal IP.
-		// No MTU override — Hetzner vSwitch handles MTU negotiation.
-		vlanEntry := map[string]interface{}{
-			"vlanId": vlanCfg.ID,
-			"addresses": []interface{}{
-				fmt.Sprintf("%s/%d", internalIP, prefixLen),
-			},
-		}
-
-		// Find existing VLAN entries (from strategicPatches) and inject the address.
-		// strategicPatches provides: deviceSelector: {physical: true} + vlans: [{vlanId: 4000}]
-		// CAPHR adds: addresses: ["10.10.0.x/24"] to the VLAN entry.
-		// Do NOT create new interface entries — strategicPatches handles NIC selection.
-		interfaces, ok := network["interfaces"].([]interface{})
-		if !ok {
-			interfaces = []interface{}{}
-		}
-
-		injected := false
+		// Remove any existing VLAN entries from template interfaces.
+		// The template may have `vlans: [{vlanId: 4000}]` on `deviceSelector: {physical: true}`
+		// which would create VLANs on ALL physical NICs. Strip them — we create a dedicated entry below.
+		interfaces, _ := network["interfaces"].([]interface{})
 		for _, iface := range interfaces {
 			ifMap, ok := iface.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			vlans, _ := ifMap["vlans"].([]interface{})
-			for j, vlan := range vlans {
-				vlanMap, ok := vlan.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				// YAML numbers unmarshal as float64 in Go's map[string]interface{},
-				// not int. Must handle both types.
-				var vid int
-				switch v := vlanMap["vlanId"].(type) {
-				case int:
-					vid = v
-				case float64:
-					vid = int(v)
-				}
-				if vid == vlanCfg.ID {
-					// Found matching VLAN — inject address
-					vlanMap["addresses"] = []interface{}{
-						fmt.Sprintf("%s/%d", internalIP, prefixLen),
-					}
-					vlans[j] = vlanMap
-					injected = true
-					break
-				}
-			}
-			if injected {
-				break
-			}
+			delete(ifMap, "vlans")
 		}
 
-		if !injected {
-			// No existing VLAN entry found — add one to first interface
-			if len(interfaces) > 0 {
-				ifMap, _ := interfaces[0].(map[string]interface{})
-				existingVlans, _ := ifMap["vlans"].([]interface{})
-				ifMap["vlans"] = append(existingVlans, vlanEntry)
-			} else {
-				interfaces = append(interfaces, map[string]interface{}{
-					"deviceSelector": map[string]interface{}{"physical": true},
-					"vlans":          []interface{}{vlanEntry},
-				})
-			}
+		// Create a dedicated VLAN interface entry with MAC-based selector.
+		// Only the primary NIC (detected in rescue via DHCP) gets the VLAN.
+		// This prevents dual-port NICs from creating duplicate VLAN interfaces.
+		vlanIface := map[string]interface{}{
+			"deviceSelector": map[string]interface{}{
+				"hardwareAddr": primaryMAC,
+			},
+			"vlans": []interface{}{
+				map[string]interface{}{
+					"vlanId": vlanCfg.ID,
+					"addresses": []interface{}{
+						fmt.Sprintf("%s/%d", internalIP, prefixLen),
+					},
+				},
+			},
 		}
+		interfaces = append(interfaces, vlanIface)
 
 		network["interfaces"] = interfaces
 		return nil
