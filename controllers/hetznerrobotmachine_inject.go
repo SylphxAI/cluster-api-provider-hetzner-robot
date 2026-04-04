@@ -86,7 +86,7 @@ func injectInstallDisk(configData []byte, installDisk string) ([]byte, error) {
 // (rescue uses eth0, Talos uses enp193s0f0np0, etc.).
 // Also sets kubelet dual-stack nodeIP and IPv6 forwarding sysctl.
 func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, internalIP string) ([]byte, error) {
-	if ipv6Net == "" || primaryMAC == "" {
+	if ipv6Net == "" {
 		return configData, nil
 	}
 
@@ -94,52 +94,29 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		machine := ensureMap(config, "machine")
 		network := ensureMap(machine, "network")
 
-		// ipv6Net from Hetzner API may include prefix length (e.g. "2a01:4f8:271:3b49::/64").
-		// Strip it before constructing the host address.
-		ipv6Prefix := strings.Split(ipv6Net, "/")[0] // "2a01:4f8:271:3b49::"
-		ipv6Addr := ipv6Prefix + "1/64"              // "2a01:4f8:271:3b49::1/64"
+		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
+		ipv6Addr := ipv6Prefix + "1/64"
 
-		// Find existing interface by deviceSelector MAC or create new
-		interfaces, _ := network["interfaces"].([]interface{})
-		found := false
-		for _, iface := range interfaces {
-			ifMap, ok := iface.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			// Match by deviceSelector.hardwareAddr or by legacy interface name
-			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-				addrs, _ := ifMap["addresses"].([]interface{})
-				addrs = append(addrs, ipv6Addr)
-				ifMap["addresses"] = addrs
-				routes, _ := ifMap["routes"].([]interface{})
-				routes = append(routes, map[string]interface{}{
+		// IPv6 goes in a SEPARATE interface entry (deviceSelector: physical only, no MAC).
+		// Must NOT merge into the DHCP+VLAN entry — combining dhcp:true with
+		// static addresses on the same interface causes Talos networking failures.
+		// This matches the proven working config on existing nodes.
+		newIface := map[string]interface{}{
+			"deviceSelector": map[string]interface{}{
+				"physical": true,
+			},
+			"addresses": []interface{}{ipv6Addr},
+			"routes": []interface{}{
+				map[string]interface{}{
 					"network": "::/0",
 					"gateway": "fe80::1",
-				})
-				ifMap["routes"] = routes
-				found = true
-				break
-			}
+				},
+			},
 		}
 
-		if !found {
-			newIface := map[string]interface{}{
-				"deviceSelector": map[string]interface{}{
-					"hardwareAddr": primaryMAC, "physical": true,
-				},
-				"addresses": []interface{}{ipv6Addr},
-				"routes": []interface{}{
-					map[string]interface{}{
-						"network": "::/0",
-						"gateway": "fe80::1",
-					},
-				},
-			}
-			interfaces = append(interfaces, newIface)
-			network["interfaces"] = interfaces
-		}
+		interfaces, _ := network["interfaces"].([]interface{})
+		interfaces = append(interfaces, newIface)
+		network["interfaces"] = interfaces
 
 		// Set IPv6 forwarding sysctl (required for pod routing)
 		sysctls := ensureMap(machine, "sysctls")
