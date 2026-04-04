@@ -201,57 +201,55 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 			},
 		}
 
-		// Parent NIC: static /32 public IP + explicit gateway + VLAN overlay.
-		// DHCP with deviceSelector breaks Talos networking completely (no public IP).
-		// Static /32 is the correct approach for Hetzner — matches their network isolation.
-		parentRoutes := []interface{}{
-			map[string]interface{}{
-				"network": "0.0.0.0/0",
-				"gateway": gatewayIP,
-			},
-			map[string]interface{}{
-				"network": gatewayIP + "/32",
-			},
-		}
-		ifaceEntry := map[string]interface{}{
-			"deviceSelector": map[string]interface{}{
-				"hardwareAddr": primaryMAC, "physical": true,
-			},
-			"addresses": []interface{}{serverIP + "/32"},
-			"routes":    parentRoutes,
-			"vlans":     []interface{}{vlanEntry},
-		}
-
-		// Find or create the interfaces list
+		// Find existing VLAN entries (from strategicPatches) and inject the address.
+		// strategicPatches provides: deviceSelector: {physical: true} + vlans: [{vlanId: 4000}]
+		// CAPHR adds: addresses: ["10.10.0.x/24"] to the VLAN entry.
+		// Do NOT create new interface entries — strategicPatches handles NIC selection.
 		interfaces, ok := network["interfaces"].([]interface{})
 		if !ok {
 			interfaces = []interface{}{}
 		}
 
-		// Check if an entry for this NIC already exists (by deviceSelector MAC) — merge VLAN into it
-		found := false
-		for i, iface := range interfaces {
+		injected := false
+		for _, iface := range interfaces {
 			ifMap, ok := iface.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
-			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-				// Set static /32 public IP
-				delete(ifMap, "dhcp")
-				ifMap["addresses"] = []interface{}{serverIP + "/32"}
-				ifMap["routes"] = parentRoutes
-				// Add VLAN to existing vlans list (or create new)
-				existingVlans, _ := ifMap["vlans"].([]interface{})
-				ifMap["vlans"] = append(existingVlans, vlanEntry)
-				interfaces[i] = ifMap
-				found = true
+			vlans, _ := ifMap["vlans"].([]interface{})
+			for j, vlan := range vlans {
+				vlanMap, ok := vlan.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				vid, _ := vlanMap["vlanId"].(int)
+				if vid == vlanCfg.ID {
+					// Found matching VLAN — inject address
+					vlanMap["addresses"] = []interface{}{
+						fmt.Sprintf("%s/%d", internalIP, prefixLen),
+					}
+					vlans[j] = vlanMap
+					injected = true
+					break
+				}
+			}
+			if injected {
 				break
 			}
 		}
 
-		if !found {
-			interfaces = append(interfaces, ifaceEntry)
+		if !injected {
+			// No existing VLAN entry found — add one to first interface
+			if len(interfaces) > 0 {
+				ifMap, _ := interfaces[0].(map[string]interface{})
+				existingVlans, _ := ifMap["vlans"].([]interface{})
+				ifMap["vlans"] = append(existingVlans, vlanEntry)
+			} else {
+				interfaces = append(interfaces, map[string]interface{}{
+					"deviceSelector": map[string]interface{}{"physical": true},
+					"vlans":          []interface{}{vlanEntry},
+				})
+			}
 		}
 
 		network["interfaces"] = interfaces
