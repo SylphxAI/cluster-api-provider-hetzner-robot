@@ -196,16 +196,11 @@ func injectKubeletNodeIP(configData []byte, internalIP string, ipv6Net string) (
 	})
 }
 
-// injectVLANConfig adds a VLAN interface to the Talos machineconfig and configures
-// static IPv4 routing on the parent NIC.
+// injectVLANConfig adds a VLAN interface to the Talos machineconfig.
 //
 // Uses deviceSelector by MAC address for parent NIC identification.
-// Configures static /32 address + explicit default route on the parent NIC instead
-// of DHCP. Hetzner DHCP assigns /25 or /26 prefixes which create on-link routes for
-// the entire subnet. When two servers share the same /25 (e.g., 138.199.242.217 and
-// 138.199.242.218), the kernel tries direct ARP instead of routing through the gateway.
-// Hetzner blocks direct L2 between servers, so SSH and all inter-node traffic fails.
-// Static /32 + explicit gateway forces all traffic through the router.
+// Parent NIC uses DHCP for public IP (matches proven working config on existing nodes).
+// VLAN gets a static address from HetznerRobotHost.Spec.InternalIP.
 func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP string, primaryMAC string, serverIP string, gatewayIP string) ([]byte, error) {
 	if vlanCfg == nil || internalIP == "" {
 		return configData, nil
@@ -220,42 +215,24 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 		machine := ensureMap(config, "machine")
 		network := ensureMap(machine, "network")
 
-		// Build the VLAN entry.
-		// MTU 1400 is required by Hetzner vSwitch — default 1500 + 4-byte VLAN tag
-		// header = 1504, exceeding the vSwitch underlying MTU. Large packets would
-		// be silently dropped (TCP small packets work, large transfers break).
+		// VLAN entry with static internal IP.
+		// No MTU override — Hetzner vSwitch handles MTU negotiation.
 		vlanEntry := map[string]interface{}{
 			"vlanId": vlanCfg.ID,
-			"mtu":    1400,
 			"addresses": []interface{}{
 				fmt.Sprintf("%s/%d", internalIP, prefixLen),
 			},
 		}
 
-		// Build static routes for the parent NIC.
-		// With a /32 address, the kernel has no on-link route for the gateway itself.
-		// The on-link route (gatewayIP/32 with no gateway field) tells the kernel the
-		// gateway is directly reachable on this interface. Without it, the default route
-		// fails with "network unreachable" because there's no path to the next hop.
-		parentRoutes := []interface{}{
-			map[string]interface{}{
-				"network": "0.0.0.0/0",
-				"gateway": gatewayIP,
-			},
-			map[string]interface{}{
-				"network": gatewayIP + "/32",
-			},
-		}
-
-		// Build the interface entry with deviceSelector + static IP + routes + VLAN.
-		// No DHCP — static /32 avoids Hetzner's L2 isolation issue with /25 on-link routes.
+		// Parent NIC: DHCP for public IP + VLAN overlay.
+		// DHCP is proven working on all existing nodes. Static /32 caused
+		// networking failures on some NIC types (Broadcom vs others).
 		ifaceEntry := map[string]interface{}{
 			"deviceSelector": map[string]interface{}{
 				"hardwareAddr": primaryMAC, "physical": true,
 			},
-			"addresses": []interface{}{serverIP + "/32"},
-			"routes":    parentRoutes,
-			"vlans":     []interface{}{vlanEntry},
+			"dhcp":  true,
+			"vlans": []interface{}{vlanEntry},
 		}
 
 		// Find or create the interfaces list
@@ -273,10 +250,10 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 			}
 			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
 			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-				// Set static IP config (replace any existing dhcp/addresses)
-				delete(ifMap, "dhcp")
-				ifMap["addresses"] = []interface{}{serverIP + "/32"}
-				ifMap["routes"] = parentRoutes
+				// Enable DHCP (remove any static config)
+				ifMap["dhcp"] = true
+				delete(ifMap, "addresses")
+				delete(ifMap, "routes")
 				// Add VLAN to existing vlans list (or create new)
 				existingVlans, _ := ifMap["vlans"].([]interface{})
 				ifMap["vlans"] = append(existingVlans, vlanEntry)
