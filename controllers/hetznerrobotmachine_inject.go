@@ -222,7 +222,15 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 				if !ok {
 					continue
 				}
-				vid, _ := vlanMap["vlanId"].(int)
+				// YAML numbers unmarshal as float64 in Go's map[string]interface{},
+				// not int. Must handle both types.
+				var vid int
+				switch v := vlanMap["vlanId"].(type) {
+				case int:
+					vid = v
+				case float64:
+					vid = int(v)
+				}
 				if vid == vlanCfg.ID {
 					// Found matching VLAN — inject address
 					vlanMap["addresses"] = []interface{}{
