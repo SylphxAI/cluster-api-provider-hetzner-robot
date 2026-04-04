@@ -140,6 +140,13 @@ type HetznerRobotMachineStatus struct {
 	// +optional
 	LastRetryTimestamp *metav1.Time `json:"lastRetryTimestamp,omitempty"`
 
+	// LastResetTime records when the last hardware reset was issued for this machine.
+	// Used to enforce a minimum cooldown between resets — Hetzner rate-limits
+	// reset API calls (50/hour) and a server needs at least 5 minutes to boot.
+	// Prevents duplicate resets from concurrent reconcile loops.
+	// +optional
+	LastResetTime *metav1.Time `json:"lastResetTime,omitempty"`
+
 	// Conditions provides observations of the operational state.
 	// +optional
 	Conditions clusterv1.Conditions `json:"conditions,omitempty"`

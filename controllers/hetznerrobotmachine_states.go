@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -22,6 +23,12 @@ import (
 // Provision timeout is handled by the controller (provisionTimeout constant).
 // No per-state retry limits — the global timeout covers all failure modes.
 
+// resetCooldown is the minimum time between hardware resets for the same server.
+// Prevents duplicate resets from concurrent reconcile loops that waste Hetzner
+// API quota (50 resets/hour) and interrupt in-progress boots.
+// 2 minutes covers BIOS POST (~45s) + PXE handshake (~15s) with margin.
+const resetCooldown = 2 * time.Minute
+
 // stateActivateRescue activates rescue mode via Robot API and triggers a hw reset.
 // Provision timeout (in controller) handles the case where rescue never succeeds.
 func (r *HetznerRobotMachineReconciler) stateActivateRescue(
@@ -33,6 +40,18 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 	serverIP string,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Enforce cooldown — never reset the same server more than once per 5 minutes.
+	if hrm.Status.LastResetTime != nil {
+		elapsed := time.Since(hrm.Status.LastResetTime.Time)
+		if elapsed < resetCooldown {
+			remaining := resetCooldown - elapsed
+			logger.Info("Reset cooldown active, skipping rescue activation",
+				"serverID", serverID, "elapsed", elapsed.Round(time.Second),
+				"remaining", remaining.Round(time.Second))
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
 
 	sshFingerprint, err := r.getSSHKeyFingerprint(ctx, hrc)
 	if err != nil {
@@ -51,6 +70,8 @@ func (r *HetznerRobotMachineReconciler) stateActivateRescue(
 		return ctrl.Result{}, fmt.Errorf("reset server %d: %w", serverID, err)
 	}
 
+	now := metav1.Now()
+	hrm.Status.LastResetTime = &now
 	hrm.Status.ProvisioningState = infrav1.StateActivatingRescue
 	logger.Info("Rescue activated, server resetting", "serverID", serverID)
 	// Hetzner rescue is one-shot: the rescue API flag is consumed on first PXE boot.
