@@ -212,11 +212,15 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 			delete(ifMap, "vlans")
 		}
 
-		// Create a dedicated VLAN interface entry with MAC-based selector.
-		// Only the primary NIC (detected in rescue via DHCP) gets the VLAN.
-		// This prevents dual-port NICs from creating duplicate VLAN interfaces.
+		// Create a dedicated VLAN interface entry with MAC + physical selector.
+		// Only the primary PHYSICAL NIC gets the VLAN — prevents:
+		// 1. Dual-port NICs creating duplicate VLAN interfaces
+		// 2. VLAN sub-interfaces matching by inherited MAC → infinite nesting chain
+		//    (Broadcom NICs: VLAN inherits parent MAC → selector matches VLAN → creates
+		//     VLAN-on-VLAN → 7+ chained interfaces → Cilium endpoint exhaustion)
 		vlanIface := map[string]interface{}{
 			"deviceSelector": map[string]interface{}{
+				"physical":     true,
 				"hardwareAddr": primaryMAC,
 			},
 			"vlans": []interface{}{
