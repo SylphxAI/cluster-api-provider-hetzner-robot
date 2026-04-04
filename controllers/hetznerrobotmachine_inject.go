@@ -201,15 +201,25 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 			},
 		}
 
-		// Parent NIC: DHCP for public IP + VLAN overlay.
-		// DHCP is proven working on all existing nodes. Static /32 caused
-		// networking failures on some NIC types (Broadcom vs others).
+		// Parent NIC: static /32 public IP + explicit gateway + VLAN overlay.
+		// DHCP with deviceSelector breaks Talos networking completely (no public IP).
+		// Static /32 is the correct approach for Hetzner — matches their network isolation.
+		parentRoutes := []interface{}{
+			map[string]interface{}{
+				"network": "0.0.0.0/0",
+				"gateway": gatewayIP,
+			},
+			map[string]interface{}{
+				"network": gatewayIP + "/32",
+			},
+		}
 		ifaceEntry := map[string]interface{}{
 			"deviceSelector": map[string]interface{}{
 				"hardwareAddr": primaryMAC, "physical": true,
 			},
-			"dhcp":  true,
-			"vlans": []interface{}{vlanEntry},
+			"addresses": []interface{}{serverIP + "/32"},
+			"routes":    parentRoutes,
+			"vlans":     []interface{}{vlanEntry},
 		}
 
 		// Find or create the interfaces list
@@ -227,10 +237,10 @@ func injectVLANConfig(configData []byte, vlanCfg *infrav1.VLANConfig, internalIP
 			}
 			selector, _ := ifMap["deviceSelector"].(map[string]interface{})
 			if (selector != nil && selector["hardwareAddr"] == primaryMAC) || ifMap["interface"] == primaryMAC {
-				// Enable DHCP (remove any static config)
-				ifMap["dhcp"] = true
-				delete(ifMap, "addresses")
-				delete(ifMap, "routes")
+				// Set static /32 public IP
+				delete(ifMap, "dhcp")
+				ifMap["addresses"] = []interface{}{serverIP + "/32"}
+				ifMap["routes"] = parentRoutes
 				// Add VLAN to existing vlans list (or create new)
 				existingVlans, _ := ifMap["vlans"].([]interface{})
 				ifMap["vlans"] = append(existingVlans, vlanEntry)
