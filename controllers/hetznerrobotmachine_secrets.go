@@ -3,7 +3,9 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -68,5 +70,23 @@ func (r *HetznerRobotMachineReconciler) getSSHKeyFingerprint(ctx context.Context
 		return "", fmt.Errorf("get SSH secret: %w", err)
 	}
 	return string(secret.Data["ssh-fingerprint"]), nil
+}
+
+// getSSHPublicKey derives the OpenSSH authorized_keys format public key from the
+// HRC's SSH private key. Used to inject SSH access into Flatcar Ignition configs
+// so CAPHR can SSH as `core` to verify boot and check bootstrap completion.
+func (r *HetznerRobotMachineReconciler) getSSHPublicKey(ctx context.Context, hrc *infrav1.HetznerRobotCluster) (string, error) {
+	privateKeyBytes, err := r.getSSHPrivateKey(ctx, hrc)
+	if err != nil {
+		return "", fmt.Errorf("get SSH private key for public key derivation: %w", err)
+	}
+
+	signer, err := ssh.ParsePrivateKey(privateKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("parse SSH private key: %w", err)
+	}
+
+	pubKey := ssh.MarshalAuthorizedKey(signer.PublicKey())
+	return strings.TrimSpace(string(pubKey)), nil
 }
 

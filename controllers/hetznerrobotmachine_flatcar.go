@@ -34,6 +34,22 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	// ── Pre-flight: check bootstrap data BEFORE any destructive operations ──
+	// Without bootstrap data, we can't build Ignition → wiping disks wastes time
+	// and leaves the server in a broken state until bootstrap data appears.
+	bootstrapData, err := r.getBootstrapData(ctx, machine)
+	if err != nil {
+		logger.Info("Bootstrap data not ready yet, deferring Flatcar install (no disk wipe)", "error", err)
+		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
+	}
+
+	// Derive SSH public key for Ignition injection — core user needs it for
+	// CAPHR to SSH in and verify boot + check bootstrap completion.
+	sshPubKey, err := r.getSSHPublicKey(ctx, hrc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get SSH public key for Flatcar: %w", err)
+	}
+
 	// If port 22 is not accessible, the node may have already rebooted
 	// from a previous install attempt. Activate rescue again and retry.
 	if !sshrescue.IsReachable(serverIP) {
@@ -111,13 +127,6 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 		logger.Info("All NVMe disks wiped", "ip", serverIP, "output", out)
 	}
 
-	// Build Ignition config by merging bootstrap data with CAPHR injections.
-	bootstrapData, err := r.getBootstrapData(ctx, machine)
-	if err != nil {
-		logger.Info("Bootstrap data not ready yet (Flatcar)", "error", err)
-		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
-	}
-
 	// Inject per-machine config into the Ignition JSON.
 	providerID := fmt.Sprintf("hetzner-robot://%d", serverID)
 	internalIP := hrh.Spec.InternalIP
@@ -132,6 +141,7 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 		hrh.Spec.ServerIPv6Net,
 		hw.PrimaryMAC,
 		hrc.Spec.VLANConfig,
+		sshPubKey,
 	)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("inject Flatcar config: %w", err)
@@ -140,7 +150,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 		"providerID", providerID,
 		"internalIP", internalIP,
 		"ipv6Net", hrh.Spec.ServerIPv6Net,
-		"mac", hw.PrimaryMAC)
+		"mac", hw.PrimaryMAC,
+		"sshKeyInjected", sshPubKey != "")
 
 	// Install Flatcar: DD image + create partitions + write Ignition.
 	channel := hrm.Spec.FlatcarChannel
@@ -153,30 +164,39 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
-	// EFI boot order: same as Talos — PXE first, Flatcar second.
-	// Flatcar creates an EFI entry named "Flatcar" or "GRUB" during image write.
+	// EFI boot order: delete only KNOWN stale entries (Talos, old distros),
+	// then set order: PXE first, all remaining entries second.
+	// Flatcar's GRUB creates an EFI entry with varying names across versions
+	// ("GRUB", "Flatcar", "UEFI OS", etc.) — instead of whitelisting names,
+	// we delete only entries we know are stale and preserve everything else.
 	if out, err := sshClient.Run(`
 		if command -v efibootmgr > /dev/null 2>&1; then
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
-			# Delete ALL boot entries except PXE/Network and Flatcar/GRUB
-			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6\|flatcar\|grub' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+			echo "Before cleanup:"
+			efibootmgr
+
+			# Delete only KNOWN stale entries — Talos, old distros
+			# Do NOT delete unknown entries (Flatcar GRUB may be named "UEFI OS")
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iE 'talos|debian|ubuntu|centos|rocky|alma' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+				echo "Deleting stale entry: Boot${entry}"
 				efibootmgr -b "$entry" -B 2>/dev/null || true
 			done
 
-			# Set boot order: PXE first, then Flatcar/GRUB
-			FLATCAR_NUM=$(efibootmgr | grep -iE 'Flatcar|GRUB' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
-			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			if [ -n "$PXE_NUMS" ] && [ -n "$FLATCAR_NUM" ]; then
-				efibootmgr -o "${PXE_NUMS},${FLATCAR_NUM}" 2>&1
+			# Set boot order: PXE first, then ALL remaining non-PXE entries.
+			# This guarantees Flatcar boots regardless of its EFI entry name.
+			PXE_NUMS=$(efibootmgr | grep -iE 'PXE|Network|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
+			OTHER_NUMS=$(efibootmgr | grep '^Boot[0-9A-Fa-f]' | grep -ivE 'PXE|Network|IPv4|IPv6' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
+			if [ -n "$PXE_NUMS" ] && [ -n "$OTHER_NUMS" ]; then
+				efibootmgr -o "${PXE_NUMS},${OTHER_NUMS}" 2>&1
+			elif [ -n "$OTHER_NUMS" ]; then
+				efibootmgr -o "${OTHER_NUMS}" 2>&1
 			elif [ -n "$PXE_NUMS" ]; then
 				efibootmgr -o "${PXE_NUMS}" 2>&1
-			elif [ -n "$FLATCAR_NUM" ]; then
-				efibootmgr -o "${FLATCAR_NUM}" 2>&1
 			fi
 
-			echo "EFI:"
+			echo "After cleanup:"
 			efibootmgr
 		fi
 	`); err != nil {
@@ -365,7 +385,8 @@ type IgnitionNetworkdUnit struct {
 }
 
 // injectFlatcarConfig takes CABPK-generated Ignition JSON and injects
-// CAPHR per-machine config: providerID, nodeIP, VLAN, IPv6, devmapper setup.
+// CAPHR per-machine config: providerID, nodeIP, VLAN, IPv6, devmapper setup,
+// and SSH authorized keys for the core user.
 func injectFlatcarConfig(
 	bootstrapData []byte,
 	providerID string,
@@ -373,6 +394,7 @@ func injectFlatcarConfig(
 	ipv6Net string,
 	primaryMAC string,
 	vlanConfig *infrav1.VLANConfig,
+	sshPublicKey string,
 ) ([]byte, error) {
 	// Parse the Ignition JSON from CABPK.
 	var ign map[string]interface{}
@@ -442,8 +464,13 @@ func injectFlatcarConfig(
 		addNetworkdIPv6(networkd, ipv6Addr, primaryMAC)
 	}
 
-	// ── 5. Inject SSH authorized keys for debugging ─────────────────────
-	// (CABPK should already include SSH keys from the KubeadmConfig, skip here)
+	// ── 5. Inject SSH authorized keys for core user ─────────────────────
+	// CAPHR needs SSH access as `core` to verify Flatcar boot and check
+	// bootstrap completion. The CABPK Ignition may or may not include SSH
+	// keys (depends on KubeadmConfig), so we always inject our own.
+	if sshPublicKey != "" {
+		addSSHAuthorizedKey(ign, "core", sshPublicKey)
+	}
 
 	// Marshal back to JSON.
 	result, err := json.MarshalIndent(ign, "", "  ")
@@ -546,6 +573,50 @@ VLAN=vlan%d
 	})
 
 	networkd["units"] = units
+}
+
+// addSSHAuthorizedKey injects an SSH public key into the Ignition passwd section
+// for the specified user. Creates the passwd.users array if it doesn't exist.
+// If the user already exists, appends the key to their sshAuthorizedKeys.
+func addSSHAuthorizedKey(ign map[string]interface{}, username, pubKey string) {
+	if _, ok := ign["passwd"]; !ok {
+		ign["passwd"] = map[string]interface{}{}
+	}
+	passwd := ign["passwd"].(map[string]interface{})
+	if _, ok := passwd["users"]; !ok {
+		passwd["users"] = []interface{}{}
+	}
+	users := passwd["users"].([]interface{})
+
+	// Find existing user entry.
+	for i, u := range users {
+		user, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if user["name"] == username {
+			// Append to existing sshAuthorizedKeys.
+			keys, _ := user["sshAuthorizedKeys"].([]interface{})
+			// Avoid duplicates.
+			for _, k := range keys {
+				if k == pubKey {
+					return
+				}
+			}
+			keys = append(keys, pubKey)
+			user["sshAuthorizedKeys"] = keys
+			users[i] = user
+			passwd["users"] = users
+			return
+		}
+	}
+
+	// User doesn't exist — create entry.
+	users = append(users, map[string]interface{}{
+		"name":              username,
+		"sshAuthorizedKeys": []interface{}{pubKey},
+	})
+	passwd["users"] = users
 }
 
 func addNetworkdIPv6(networkd map[string]interface{}, ipv6Addr, primaryMAC string) {
