@@ -166,10 +166,11 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
-	// EFI boot order: flatcar-install -u already created a proper EFI boot entry
-	// via efibootmgr -c. We just set the order: PXE first (for rescue), Flatcar second.
-	// Also delete stale entries (Talos, old distros) to keep NVRAM clean.
-	if out, err := sshClient.Run(`
+	// EFI boot order: delete ALL stale entries, re-create one clean Flatcar entry
+	// pointing to the current installDisk, then set PXE first + Flatcar second.
+	// Multiple Flatcar entries from previous installs cause boot failures when
+	// they point to different NVMe disks (enumeration swaps between boots).
+	efiScript := fmt.Sprintf(`
 		if command -v efibootmgr > /dev/null 2>&1; then
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
@@ -177,12 +178,18 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 			echo "Before:"
 			efibootmgr
 
-			# Delete stale entries (Talos, old distros, generic "UEFI OS")
-			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iE 'talos|debian|ubuntu|centos|rocky|alma|UEFI OS' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+			# Delete ALL non-PXE entries (stale Flatcar, Talos, UEFI OS, etc).
+			# flatcar-install -u just created the ONE correct entry. All others
+			# are from previous installs and may point to wrong disks.
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -ivE 'PXE|Network|IPv4|IPv6|EFI Shell' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
 				efibootmgr -b "$entry" -B 2>/dev/null || true
 			done
 
-			# Set order: PXE first, Flatcar second, then rest
+			# Re-create the Flatcar entry fresh (flatcar-install already did this,
+			# but we deleted it above to ensure clean state)
+			efibootmgr -c -d %s -l '\efi\boot\bootx64.efi' -L 'Flatcar' 2>/dev/null || true
+
+			# Set order: PXE first, Flatcar second
 			PXE_NUMS=$(efibootmgr | grep -iE 'PXE|Network|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
 			FLATCAR_NUM=$(efibootmgr | grep -i 'Flatcar' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
 			if [ -n "$PXE_NUMS" ] && [ -n "$FLATCAR_NUM" ]; then
@@ -194,7 +201,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 			echo "After:"
 			efibootmgr
 		fi
-	`); err != nil {
+	`, installDisk)
+	if out, err := sshClient.Run(efiScript); err != nil {
 		logger.Info("Post-install EFI fix failed (non-fatal)", "error", err, "output", out)
 	} else {
 		logger.Info("EFI boot order fix applied", "output", out)
