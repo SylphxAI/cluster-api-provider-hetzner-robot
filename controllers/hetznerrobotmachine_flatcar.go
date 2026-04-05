@@ -312,7 +312,6 @@ type IgnitionConfig struct {
 	Ignition IgnitionMeta      `json:"ignition"`
 	Storage  *IgnitionStorage  `json:"storage,omitempty"`
 	Systemd  *IgnitionSystemd  `json:"systemd,omitempty"`
-	Networkd *IgnitionNetworkd `json:"networkd,omitempty"`
 	// Passwd and other fields pass through via rawFields.
 	rawFields map[string]json.RawMessage
 }
@@ -375,15 +374,6 @@ type IgnitionDropin struct {
 	Contents string `json:"contents"`
 }
 
-type IgnitionNetworkd struct {
-	Units []IgnitionNetworkdUnit `json:"units,omitempty"`
-}
-
-type IgnitionNetworkdUnit struct {
-	Name     string `json:"name"`
-	Contents string `json:"contents"`
-}
-
 // injectFlatcarConfig takes CABPK-generated Ignition JSON and injects
 // CAPHR per-machine config: providerID, nodeIP, VLAN, IPv6, devmapper setup,
 // and SSH authorized keys for the core user.
@@ -440,28 +430,23 @@ func injectFlatcarConfig(
 		addKubeletDropin(systemd, kubeletArgs)
 	}
 
-	// ── 4. Inject network config (VLAN + IPv6) ──────────────────────────
-
-	if _, ok := ign["networkd"]; !ok {
-		ign["networkd"] = map[string]interface{}{}
-	}
-	networkd := ign["networkd"].(map[string]interface{})
-	if _, ok := networkd["units"]; !ok {
-		networkd["units"] = []interface{}{}
-	}
+	// ── 4. Inject network config (VLAN + IPv6) as storage files ─────────
+	// Ignition 3.x does NOT support the `networkd` top-level key (removed
+	// after Ignition 2.x / Container Linux Config). Networkd configs must
+	// be written as files under /etc/systemd/network/ via storage.files.
 
 	if vlanConfig != nil && internalIP != "" {
 		prefixLen := vlanConfig.PrefixLength
 		if prefixLen == 0 {
 			prefixLen = 24
 		}
-		addNetworkdVLAN(networkd, vlanConfig.ID, internalIP, prefixLen, primaryMAC)
+		addNetworkdVLANFiles(storage, vlanConfig.ID, internalIP, prefixLen, primaryMAC)
 	}
 
 	if ipv6Net != "" {
 		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
 		ipv6Addr := ipv6Prefix + "1/64"
-		addNetworkdIPv6(networkd, ipv6Addr, primaryMAC)
+		addNetworkdIPv6File(storage, ipv6Addr, primaryMAC)
 	}
 
 	// ── 5. Inject SSH authorized keys for core user ─────────────────────
@@ -532,9 +517,10 @@ Environment="KUBELET_EXTRA_ARGS=%s"
 	}
 }
 
-func addNetworkdVLAN(networkd map[string]interface{}, vlanID int, internalIP string, prefixLen int, primaryMAC string) {
-	units := networkd["units"].([]interface{})
-
+// addNetworkdVLANFiles writes VLAN networkd configs as files under /etc/systemd/network/.
+// Ignition 3.x requires networkd config as storage.files, NOT the `networkd` top-level key
+// (which was removed after Ignition 2.x / Container Linux Config).
+func addNetworkdVLANFiles(storage map[string]interface{}, vlanID int, internalIP string, prefixLen int, primaryMAC string) {
 	// VLAN netdev — creates the VLAN virtual device.
 	vlanNetdev := fmt.Sprintf(`[NetDev]
 Name=vlan%d
@@ -543,10 +529,7 @@ Kind=vlan
 [VLAN]
 Id=%d
 `, vlanID, vlanID)
-	units = append(units, map[string]interface{}{
-		"name":     fmt.Sprintf("10-vlan%d.netdev", vlanID),
-		"contents": vlanNetdev,
-	})
+	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.netdev", vlanID), vlanNetdev, 0o644)
 
 	// VLAN network — assigns IP to the VLAN interface.
 	vlanNetwork := fmt.Sprintf(`[Match]
@@ -555,10 +538,7 @@ Name=vlan%d
 [Network]
 Address=%s/%d
 `, vlanID, internalIP, prefixLen)
-	units = append(units, map[string]interface{}{
-		"name":     fmt.Sprintf("10-vlan%d.network", vlanID),
-		"contents": vlanNetwork,
-	})
+	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.network", vlanID), vlanNetwork, 0o644)
 
 	// Primary NIC — add VLAN to the physical interface matched by MAC.
 	// MUST keep DHCP=yes so the public IPv4 is still assigned. Without it,
@@ -571,12 +551,22 @@ MACAddress=%s
 DHCP=yes
 VLAN=vlan%d
 `, primaryMAC, vlanID)
-	units = append(units, map[string]interface{}{
-		"name":     "05-primary-vlan.network",
-		"contents": primaryNetwork,
-	})
+	addIgnitionFile(storage, "/etc/systemd/network/05-primary-vlan.network", primaryNetwork, 0o644)
+}
 
-	networkd["units"] = units
+// addNetworkdIPv6File writes IPv6 networkd config as a file under /etc/systemd/network/.
+func addNetworkdIPv6File(storage map[string]interface{}, ipv6Addr, primaryMAC string) {
+	ipv6Network := fmt.Sprintf(`[Match]
+MACAddress=%s
+
+[Network]
+Address=%s
+
+[Route]
+Destination=::/0
+Gateway=fe80::1
+`, primaryMAC, ipv6Addr)
+	addIgnitionFile(storage, "/etc/systemd/network/10-ipv6.network", ipv6Network, 0o644)
 }
 
 // addSSHAuthorizedKey injects an SSH public key into the Ignition passwd section
@@ -621,28 +611,6 @@ func addSSHAuthorizedKey(ign map[string]interface{}, username, pubKey string) {
 		"sshAuthorizedKeys": []interface{}{pubKey},
 	})
 	passwd["users"] = users
-}
-
-func addNetworkdIPv6(networkd map[string]interface{}, ipv6Addr, primaryMAC string) {
-	units := networkd["units"].([]interface{})
-
-	ipv6Network := fmt.Sprintf(`[Match]
-MACAddress=%s
-
-[Network]
-Address=%s
-
-[Route]
-Destination=::/0
-Gateway=fe80::1
-`, primaryMAC, ipv6Addr)
-
-	units = append(units, map[string]interface{}{
-		"name":     "10-ipv6.network",
-		"contents": ipv6Network,
-	})
-
-	networkd["units"] = units
 }
 
 func buildKubeletExtraArgs(providerID, internalIP, ipv6Net string) string {
