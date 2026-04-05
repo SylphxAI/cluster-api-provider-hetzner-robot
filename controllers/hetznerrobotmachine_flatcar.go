@@ -561,10 +561,14 @@ Address=%s/%d
 	})
 
 	// Primary NIC — add VLAN to the physical interface matched by MAC.
+	// MUST keep DHCP=yes so the public IPv4 is still assigned. Without it,
+	// this more-specific unit overrides the default Flatcar networkd config
+	// and the server loses its public IP → unreachable via SSH.
 	primaryNetwork := fmt.Sprintf(`[Match]
 MACAddress=%s
 
 [Network]
+DHCP=yes
 VLAN=vlan%d
 `, primaryMAC, vlanID)
 	units = append(units, map[string]interface{}{
