@@ -305,7 +305,9 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 			clusterv1.MachineAddress{Type: clusterv1.MachineExternalIP, Address: ipv6Addr})
 	}
 
-	// Run state machine
+	// Run state machine — OS-aware routing.
+	// Common states (rescue) are shared between Talos and Flatcar.
+	// Install/boot/config states branch based on hrm.Spec.OSType.
 	switch hrm.Status.ProvisioningState {
 	case infrav1.StateNone:
 		// Clean slate: always go through the full rescue → wipe → install cycle.
@@ -316,15 +318,30 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInRescue:
+		// Branch: Talos vs Flatcar install in rescue.
+		if isFlatcar(hrm) {
+			return r.stateInstallFlatcar(ctx, hrm, machine, hrc, hrh, robotClient, serverID, serverIP)
+		}
 		return r.stateInstallTalos(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateInstalling:
+		// Branch: wait for different OS boot indicators.
+		if isFlatcar(hrm) {
+			return r.stateWaitFlatcarInstall(ctx, hrm, hrc, robotClient, serverID, serverIP)
+		}
 		return r.stateWaitInstall(ctx, hrm, hrc, robotClient, serverID, serverIP)
+
+	// Talos-only states:
 	case infrav1.StateBootingTalos:
 		return r.stateWaitTalosMaintenanceMode(ctx, hrm, machine, cluster, hrc, serverIP)
 	case infrav1.StateApplyingConfig:
 		return r.stateApplyConfig(ctx, hrm, machine, cluster, hrc, hrh, serverID, serverIP)
 	case infrav1.StateWaitingForBoot:
 		return r.stateWaitForBoot(ctx, hrm, machine, serverIP)
+
+	// Flatcar-only state:
+	case infrav1.StateBootingFlatcar:
+		return r.stateWaitFlatcarBoot(ctx, hrm, machine, hrc, serverIP)
+
 	case infrav1.StateError:
 		// Terminal state. No auto-recovery. No polling.
 		// Recovery via MachineHealthCheck remediation or manual Machine deletion.

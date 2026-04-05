@@ -21,9 +21,16 @@ const (
 	StateBootingTalos     ProvisioningState = "BootingTalos"
 	StateApplyingConfig   ProvisioningState = "ApplyingConfig"
 	StateWaitingForBoot   ProvisioningState = "WaitingForBoot" // waiting for Talos reboot after config apply
+	StateBootingFlatcar   ProvisioningState = "BootingFlatcar" // waiting for Flatcar SSH + kubeadm join
 	StateProvisioned      ProvisioningState = "Provisioned"
 	StateDeleting         ProvisioningState = "Deleting"
 	StateError            ProvisioningState = "Error"
+)
+
+// OSType constants for the operating system to install on worker nodes.
+const (
+	OSTypeTalos   = "talos"
+	OSTypeFlatcar = "flatcar"
 )
 
 // HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
@@ -43,24 +50,42 @@ type HetznerRobotMachineSpec struct {
 	// +optional
 	HostSelector *metav1.LabelSelector `json:"hostSelector,omitempty"`
 
+	// OSType selects which operating system to install: "talos" or "flatcar".
+	// Talos uses gRPC ApplyConfig after boot; Flatcar uses Ignition written to OEM
+	// partition in rescue before first boot. Default: "talos".
+	// +optional
+	// +kubebuilder:default="talos"
+	// +kubebuilder:validation:Enum=talos;flatcar
+	OSType string `json:"osType,omitempty"`
+
 	// TalosSchematic is the Talos factory schematic ID (with extensions).
+	// Required when osType is "talos". Ignored for "flatcar".
 	// Example: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
-	TalosSchematic string `json:"talosSchematic"`
+	// +optional
+	TalosSchematic string `json:"talosSchematic,omitempty"`
 
 	// TalosVersion is the Talos version to install.
+	// Required when osType is "talos". Ignored for "flatcar".
 	// Example: v1.12.4
-	TalosVersion string `json:"talosVersion"`
+	// +optional
+	TalosVersion string `json:"talosVersion,omitempty"`
 
-	// InstallDisk is the disk to install Talos on.
+	// FlatcarChannel is the Flatcar release channel: "stable", "beta", or "alpha".
+	// Only used when osType is "flatcar". Default: "stable".
+	// +optional
+	// +kubebuilder:default="stable"
+	// +kubebuilder:validation:Enum=stable;beta;alpha
+	FlatcarChannel string `json:"flatcarChannel,omitempty"`
+
+	// InstallDisk is the disk to install the OS on.
 	// Defaults to /dev/nvme0n1
 	// +optional
 	// +kubebuilder:default="/dev/nvme0n1"
 	InstallDisk string `json:"installDisk,omitempty"`
 
-	// CustomImageURL, if set, overrides the Talos Factory image URL.
-	// Used for custom Talos images with baked-in extensions (e.g. devmapper-pool).
-	// The URL must point to a raw metal image (zstd or xz compressed).
-	// Example: "https://github.com/SylphxAI/talos-images/releases/download/v1.12.6/metal-amd64.raw.zst"
+	// CustomImageURL, if set, overrides the default OS image URL.
+	// For Talos: overrides Talos Factory URL. For Flatcar: overrides release channel URL.
+	// The URL must point to a raw disk image (zstd, xz, or bz2 compressed).
 	// +optional
 	CustomImageURL string `json:"customImageURL,omitempty"`
 
@@ -68,7 +93,7 @@ type HetznerRobotMachineSpec struct {
 	// and creates a raw data partition ("osd-data") with the remaining disk space.
 	// Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
 	// The data partition appears at /dev/disk/by-partlabel/r-osd-data and is
-	// intended for Ceph OSD use. Only applicable to storage nodes.
+	// intended for Ceph OSD use. Only applicable to storage nodes with osType "talos".
 	// Example: "100GiB"
 	// +optional
 	EphemeralSize string `json:"ephemeralSize,omitempty"`

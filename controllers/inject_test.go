@@ -296,41 +296,28 @@ cluster:
 	network := machine["network"].(map[string]interface{})
 	interfaces := network["interfaces"].([]interface{})
 
+	// injectVLANConfig now creates a DEDICATED interface entry with
+	// deviceSelector{physical:true, hardwareAddr:MAC} and vlans.
+	// No addresses/routes on parent — just MAC selector + VLAN sub-entry.
 	if len(interfaces) != 1 {
-		t.Fatalf("expected 1 interface, got %d", len(interfaces))
+		t.Fatalf("expected 1 interface (dedicated VLAN entry), got %d", len(interfaces))
 	}
 
 	iface := interfaces[0].(map[string]interface{})
-	// injectVLANConfig uses deviceSelector by MAC, not interface name
 	selector := iface["deviceSelector"].(map[string]interface{})
 	if selector["hardwareAddr"] != "aa:bb:cc:dd:ee:ff" {
 		t.Errorf("expected deviceSelector.hardwareAddr aa:bb:cc:dd:ee:ff, got %v", selector["hardwareAddr"])
 	}
-
-	// Static /32 address instead of DHCP
-	if iface["dhcp"] != nil {
-		t.Errorf("expected no dhcp field (static config), got %v", iface["dhcp"])
-	}
-	parentAddrs := iface["addresses"].([]interface{})
-	if len(parentAddrs) != 1 || parentAddrs[0] != "138.199.242.217/32" {
-		t.Errorf("expected parent address 138.199.242.217/32, got %v", parentAddrs)
+	if selector["physical"] != true {
+		t.Errorf("expected deviceSelector.physical true, got %v", selector["physical"])
 	}
 
-	// Static routes: default route + on-link route to gateway
-	routes := iface["routes"].([]interface{})
-	if len(routes) != 2 {
-		t.Fatalf("expected 2 routes, got %d", len(routes))
+	// No addresses or routes on the parent interface — VLAN only.
+	if iface["addresses"] != nil {
+		t.Errorf("expected no addresses on parent interface, got %v", iface["addresses"])
 	}
-	defaultRoute := routes[0].(map[string]interface{})
-	if defaultRoute["network"] != "0.0.0.0/0" || defaultRoute["gateway"] != "138.199.242.129" {
-		t.Errorf("expected default route via 138.199.242.129, got %v", defaultRoute)
-	}
-	onlinkRoute := routes[1].(map[string]interface{})
-	if onlinkRoute["network"] != "138.199.242.129/32" {
-		t.Errorf("expected on-link route 138.199.242.129/32, got %v", onlinkRoute)
-	}
-	if _, hasGW := onlinkRoute["gateway"]; hasGW {
-		t.Errorf("on-link route should not have gateway field, got %v", onlinkRoute["gateway"])
+	if iface["routes"] != nil {
+		t.Errorf("expected no routes on parent interface, got %v", iface["routes"])
 	}
 
 	vlans := iface["vlans"].([]interface{})
@@ -404,34 +391,30 @@ func TestInjectVLANConfig_MergeExistingInterface(t *testing.T) {
 	network := machine["network"].(map[string]interface{})
 	interfaces := network["interfaces"].([]interface{})
 
-	// Should still be 1 interface (merged, not duplicated)
-	if len(interfaces) != 1 {
-		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	// Current behavior: existing interface has vlans stripped, new dedicated VLAN entry appended.
+	// 2 interfaces: original (vlans stripped) + dedicated VLAN entry.
+	if len(interfaces) != 2 {
+		t.Fatalf("expected 2 interfaces (original + dedicated VLAN), got %d", len(interfaces))
 	}
 
-	iface := interfaces[0].(map[string]interface{})
-	// Original settings preserved
-	if iface["mtu"] != 9000 {
-		t.Errorf("expected mtu 9000 preserved, got %v", iface["mtu"])
+	// First interface: original with vlans stripped, mtu preserved.
+	origIface := interfaces[0].(map[string]interface{})
+	if origIface["mtu"] != 9000 {
+		t.Errorf("expected mtu 9000 preserved on original interface, got %v", origIface["mtu"])
 	}
-	// No DHCP — static /32 config
-	if iface["dhcp"] != nil {
-		t.Errorf("expected no dhcp field (static config), got %v", iface["dhcp"])
+	if origIface["vlans"] != nil {
+		t.Errorf("expected vlans stripped from original interface, got %v", origIface["vlans"])
 	}
-	// Static /32 address
-	parentAddrs := iface["addresses"].([]interface{})
-	if len(parentAddrs) != 1 || parentAddrs[0] != "138.199.242.218/32" {
-		t.Errorf("expected parent address 138.199.242.218/32, got %v", parentAddrs)
+
+	// Second interface: dedicated VLAN entry with MAC + physical selector.
+	vlanIface := interfaces[1].(map[string]interface{})
+	selector := vlanIface["deviceSelector"].(map[string]interface{})
+	if selector["hardwareAddr"] != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("expected deviceSelector.hardwareAddr aa:bb:cc:dd:ee:ff, got %v", selector["hardwareAddr"])
 	}
-	// Static routes
-	routes := iface["routes"].([]interface{})
-	if len(routes) != 2 {
-		t.Fatalf("expected 2 routes, got %d", len(routes))
-	}
-	// VLAN added
-	vlans := iface["vlans"].([]interface{})
+	vlans := vlanIface["vlans"].([]interface{})
 	if len(vlans) != 1 {
-		t.Fatalf("expected 1 vlan, got %d", len(vlans))
+		t.Fatalf("expected 1 vlan on dedicated entry, got %d", len(vlans))
 	}
 }
 
@@ -529,8 +512,9 @@ func TestInjectIPv6Config_Empty(t *testing.T) {
 	}
 }
 
-func TestInjectIPv6Config_MergeExistingInterface(t *testing.T) {
-	// Existing config uses deviceSelector with MAC — injectIPv6Config matches by hardwareAddr
+func TestInjectIPv6Config_SeparateInterface(t *testing.T) {
+	// injectIPv6Config creates a SEPARATE interface entry (not merged into existing).
+	// Combining dhcp:true with static addresses on the same interface causes Talos failures.
 	input := []byte(`machine:
   network:
     interfaces:
@@ -554,21 +538,23 @@ func TestInjectIPv6Config_MergeExistingInterface(t *testing.T) {
 	network := machine["network"].(map[string]interface{})
 	interfaces := network["interfaces"].([]interface{})
 
-	if len(interfaces) != 1 {
-		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	// 2 interfaces: original (unchanged) + new IPv6 entry.
+	if len(interfaces) != 2 {
+		t.Fatalf("expected 2 interfaces (original + IPv6), got %d", len(interfaces))
 	}
 
-	iface := interfaces[0].(map[string]interface{})
-	addrs := iface["addresses"].([]interface{})
-	// Should have both existing IPv4 + new IPv6
-	if len(addrs) != 2 {
-		t.Fatalf("expected 2 addresses (IPv4+IPv6), got %d: %v", len(addrs), addrs)
+	// Original interface unchanged.
+	origIface := interfaces[0].(map[string]interface{})
+	origAddrs := origIface["addresses"].([]interface{})
+	if len(origAddrs) != 1 || origAddrs[0] != "10.0.0.1/24" {
+		t.Errorf("expected original interface unchanged, got %v", origAddrs)
 	}
-	if addrs[0] != "10.0.0.1/24" {
-		t.Errorf("expected existing IPv4 preserved, got %v", addrs[0])
-	}
-	if addrs[1] != "2a01:4f8::1/64" {
-		t.Errorf("expected IPv6 appended, got %v", addrs[1])
+
+	// New IPv6 interface with physical selector.
+	ipv6Iface := interfaces[1].(map[string]interface{})
+	ipv6Addrs := ipv6Iface["addresses"].([]interface{})
+	if len(ipv6Addrs) != 1 || ipv6Addrs[0] != "2a01:4f8::1/64" {
+		t.Errorf("expected IPv6 address 2a01:4f8::1/64, got %v", ipv6Addrs)
 	}
 }
 
@@ -761,9 +747,9 @@ func TestInjectVLANConfig_EmptyInternalIP_NoOp(t *testing.T) {
 	}
 }
 
-func TestInjectVLANConfig_MergeExistingInterfaceWithMAC(t *testing.T) {
-	// Existing interface matched by deviceSelector MAC with extra settings.
-	// After merge: original mtu preserved, VLAN added, static routing configured.
+func TestInjectVLANConfig_DedicatedEntryWithMAC(t *testing.T) {
+	// Existing interface with MAC + extra settings.
+	// injectVLANConfig strips vlans from existing interfaces and creates a dedicated entry.
 	input := []byte(`machine:
   network:
     interfaces:
@@ -775,7 +761,7 @@ func TestInjectVLANConfig_MergeExistingInterfaceWithMAC(t *testing.T) {
 `)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4001,
-				PrefixLength: 28,
+		PrefixLength: 28,
 	}
 
 	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.10", "11:22:33:44:55:66", "5.6.7.8", "5.6.7.1")
@@ -792,23 +778,24 @@ func TestInjectVLANConfig_MergeExistingInterfaceWithMAC(t *testing.T) {
 	network := machine["network"].(map[string]interface{})
 	interfaces := network["interfaces"].([]interface{})
 
-	// Should still be 1 interface (merged, not duplicated)
-	if len(interfaces) != 1 {
-		t.Fatalf("expected 1 interface (merged), got %d", len(interfaces))
+	// 2 interfaces: original (vlans stripped) + dedicated VLAN entry.
+	if len(interfaces) != 2 {
+		t.Fatalf("expected 2 interfaces (original + dedicated VLAN), got %d", len(interfaces))
 	}
 
-	iface := interfaces[0].(map[string]interface{})
-	// MTU preserved from original
-	if iface["mtu"] != 1500 {
-		t.Errorf("expected mtu 1500 preserved, got %v", iface["mtu"])
+	// Original interface: mtu preserved, vlans stripped.
+	origIface := interfaces[0].(map[string]interface{})
+	if origIface["mtu"] != 1500 {
+		t.Errorf("expected mtu 1500 preserved, got %v", origIface["mtu"])
 	}
-	// Static /32 address replaces the old addresses
-	parentAddrs := iface["addresses"].([]interface{})
-	if len(parentAddrs) != 1 || parentAddrs[0] != "5.6.7.8/32" {
-		t.Errorf("expected parent address 5.6.7.8/32, got %v", parentAddrs)
+
+	// Dedicated VLAN entry with MAC + physical selector.
+	vlanIface := interfaces[1].(map[string]interface{})
+	selector := vlanIface["deviceSelector"].(map[string]interface{})
+	if selector["hardwareAddr"] != "11:22:33:44:55:66" {
+		t.Errorf("expected hardwareAddr 11:22:33:44:55:66, got %v", selector["hardwareAddr"])
 	}
-	// VLAN with correct prefix
-	vlans := iface["vlans"].([]interface{})
+	vlans := vlanIface["vlans"].([]interface{})
 	if len(vlans) != 1 {
 		t.Fatalf("expected 1 vlan, got %d", len(vlans))
 	}
@@ -863,7 +850,9 @@ func TestInjectIPv6Config_EmptyIPv6Net_NoOp(t *testing.T) {
 	}
 }
 
-func TestInjectIPv6Config_EmptyPrimaryMAC_NoOp(t *testing.T) {
+func TestInjectIPv6Config_EmptyPrimaryMAC_StillInjects(t *testing.T) {
+	// injectIPv6Config uses deviceSelector: {physical: true} — no MAC needed.
+	// Empty primaryMAC does NOT prevent IPv6 injection (unlike VLAN which requires MAC).
 	input := []byte(`machine:
   type: controlplane
 `)
@@ -871,8 +860,22 @@ func TestInjectIPv6Config_EmptyPrimaryMAC_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("injectIPv6Config failed: %v", err)
 	}
-	if string(result) != string(input) {
-		t.Error("empty primaryMAC should return input unchanged")
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	machine := config["machine"].(map[string]interface{})
+	network := machine["network"].(map[string]interface{})
+	interfaces := network["interfaces"].([]interface{})
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface (IPv6), got %d", len(interfaces))
+	}
+	iface := interfaces[0].(map[string]interface{})
+	addrs := iface["addresses"].([]interface{})
+	if len(addrs) != 1 || addrs[0] != "2a01:4f8:271:3b49::1/64" {
+		t.Errorf("expected IPv6 address, got %v", addrs)
 	}
 }
 

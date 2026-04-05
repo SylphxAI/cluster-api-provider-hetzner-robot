@@ -67,12 +67,6 @@ spec:
                 - host
                 - port
                 type: object
-              dc:
-                description: |-
-                  DC is the Hetzner datacenter identifier (e.g. "fsn1", "nbg1", "hel1").
-                  Used in hostname generation: compute-<dc>-<serverID>.
-                  Defaults to "fsn1" if not set.
-                type: string
               robotSecretRef:
                 description: |-
                   RobotSecretRef references the secret containing Hetzner Robot API credentials.
@@ -91,7 +85,8 @@ spec:
               sshSecretRef:
                 description: |-
                   SSHSecretRef references the secret containing the SSH key for rescue access.
-                  The secret must have keys: ssh-privatekey, ssh-publickey
+                  Required key: ssh-privatekey (PEM-encoded private key for root@rescue).
+                  Optional key: ssh-fingerprint (public key fingerprint for rescue activation).
                 properties:
                   name:
                     description: name is unique within a namespace to reference a
@@ -108,23 +103,6 @@ spec:
                   TalosFactoryBaseURL is the base URL for the Talos factory image.
                   Defaults to https://factory.talos.dev
                 type: string
-              talosSecretRef:
-                description: |-
-                  TalosSecretRef references the cluster-level Talos secret (typically {cluster-name}-talos)
-                  containing the correct secretboxEncryptionSecret. CAPT may generate a different key
-                  per Machine; this ensures all nodes use the same encryption key for etcd secrets.
-                  If set, CAPHR reads the key from this secret and injects it into the machineconfig.
-                properties:
-                  name:
-                    description: name is unique within a namespace to reference a
-                      secret resource.
-                    type: string
-                  namespace:
-                    description: namespace defines the space within which the secret
-                      name must be unique.
-                    type: string
-                type: object
-                x-kubernetes-map-type: atomic
               vlanConfig:
                 description: |-
                   VLANConfig configures an internal VLAN network on all machines in this cluster.
@@ -136,11 +114,6 @@ spec:
                     maximum: 4094
                     minimum: 1
                     type: integer
-                  interface:
-                    description: |-
-                      Interface is the parent NIC name (e.g. "enp193s0f0np0").
-                      Must match the physical interface on all servers in this cluster.
-                    type: string
                   prefixLength:
                     default: 24
                     description: PrefixLength is the CIDR prefix length for the VLAN
@@ -150,7 +123,6 @@ spec:
                     type: integer
                 required:
                 - id
-                - interface
                 type: object
             required:
             - robotSecretRef

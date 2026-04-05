@@ -57,10 +57,9 @@ spec:
             properties:
               customImageURL:
                 description: |-
-                  CustomImageURL, if set, overrides the Talos Factory image URL.
-                  Used for custom Talos images with baked-in extensions (e.g. devmapper-pool).
-                  The URL must point to a raw metal image (zstd or xz compressed).
-                  Example: "https://github.com/SylphxAI/talos-images/releases/download/v1.12.6/metal-amd64.raw.zst"
+                  CustomImageURL, if set, overrides the default OS image URL.
+                  For Talos: overrides Talos Factory URL. For Flatcar: overrides release channel URL.
+                  The URL must point to a raw disk image (zstd, xz, or bz2 compressed).
                 type: string
               ephemeralSize:
                 description: |-
@@ -68,8 +67,18 @@ spec:
                   and creates a raw data partition ("osd-data") with the remaining disk space.
                   Uses Talos v1.12+ native VolumeConfig + RawVolumeConfig documents.
                   The data partition appears at /dev/disk/by-partlabel/r-osd-data and is
-                  intended for Ceph OSD use. Only applicable to storage nodes.
+                  intended for Ceph OSD use. Only applicable to storage nodes with osType "talos".
                   Example: "100GiB"
+                type: string
+              flatcarChannel:
+                default: stable
+                description: |-
+                  FlatcarChannel is the Flatcar release channel: "stable", "beta", or "alpha".
+                  Only used when osType is "flatcar". Default: "stable".
+                enum:
+                - stable
+                - beta
+                - alpha
                 type: string
               hostRef:
                 description: |-
@@ -138,8 +147,18 @@ spec:
               installDisk:
                 default: /dev/nvme0n1
                 description: |-
-                  InstallDisk is the disk to install Talos on.
+                  InstallDisk is the disk to install the OS on.
                   Defaults to /dev/nvme0n1
+                type: string
+              osType:
+                default: talos
+                description: |-
+                  OSType selects which operating system to install: "talos" or "flatcar".
+                  Talos uses gRPC ApplyConfig after boot; Flatcar uses Ignition written to OEM
+                  partition in rescue before first boot. Default: "talos".
+                enum:
+                - talos
+                - flatcar
                 type: string
               providerID:
                 description: |-
@@ -149,16 +168,15 @@ spec:
               talosSchematic:
                 description: |-
                   TalosSchematic is the Talos factory schematic ID (with extensions).
+                  Required when osType is "talos". Ignored for "flatcar".
                   Example: 3da7f440f279f4814fa73bdf83c84710a8e93c40a4a3cbba4d969f14afb96298
                 type: string
               talosVersion:
                 description: |-
                   TalosVersion is the Talos version to install.
+                  Required when osType is "talos". Ignored for "flatcar".
                   Example: v1.12.4
                 type: string
-            required:
-            - talosSchematic
-            - talosVersion
             type: object
           status:
             description: HetznerRobotMachineStatus defines the observed state of HetznerRobotMachine.
@@ -246,6 +264,14 @@ spec:
                 description: |-
                   HostRef tracks which HetznerRobotHost was claimed by this machine.
                   Set by the controller during ClaimHost state.
+                type: string
+              lastResetTime:
+                description: |-
+                  LastResetTime records when the last hardware reset was issued for this machine.
+                  Used to enforce a minimum cooldown between resets — Hetzner rate-limits
+                  reset API calls (50/hour) and a server needs at least 5 minutes to boot.
+                  Prevents duplicate resets from concurrent reconcile loops.
+                format: date-time
                 type: string
               lastRetryTimestamp:
                 description: |-

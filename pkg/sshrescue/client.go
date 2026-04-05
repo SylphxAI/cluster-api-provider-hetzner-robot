@@ -330,6 +330,172 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk, customImageU
 	return nil
 }
 
+// InstallFlatcar installs Flatcar Container Linux by writing the production raw
+// disk image to the target disk, then creates additional partitions (r-dm-data
+// for devmapper thin-pool) and writes the Ignition config to the OEM partition.
+//
+// Flow:
+//  1. Download + decompress + write raw image via curl | bunzip2 | dd
+//  2. Re-read partition table (partprobe)
+//  3. Create r-dm-data partition (200GB) for devmapper thin-pool via sgdisk
+//  4. Mount OEM partition (partition 6, ext4)
+//  5. Write Ignition JSON to /mnt/oem/config.ign
+//  6. Unmount OEM, caller handles EFI boot order + reboot
+func (c *Client) InstallFlatcar(channel, disk, customImageURL string, ignitionJSON []byte) error {
+	if channel == "" {
+		channel = "stable"
+	}
+
+	var imageURL string
+	if customImageURL != "" {
+		imageURL = customImageURL
+	} else {
+		// Flatcar production image URL:
+		// https://stable.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image.bin.bz2
+		imageURL = fmt.Sprintf(
+			"https://%s.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image.bin.bz2",
+			channel,
+		)
+	}
+
+	// Detect decompressor based on URL extension
+	decompressCmd := "bunzip2"
+	if strings.HasSuffix(imageURL, ".xz") {
+		decompressCmd = "xzcat"
+	} else if strings.HasSuffix(imageURL, ".zst") {
+		decompressCmd = "zstdcat"
+	} else if strings.HasSuffix(imageURL, ".gz") {
+		decompressCmd = "gunzip"
+	}
+
+	// Step 1: Download and write raw image to disk.
+	installCmd := fmt.Sprintf(
+		"curl -fsSL %q | %s | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
+		imageURL, decompressCmd, disk,
+	)
+	if out, err := c.Run(installCmd); err != nil {
+		return fmt.Errorf("write Flatcar image to %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 2: Re-read partition table after writing image.
+	if out, err := c.Run(fmt.Sprintf("partprobe %q 2>&1; sleep 1", disk)); err != nil {
+		return fmt.Errorf("partprobe after Flatcar install on %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 3: Create r-dm-data partition (200GB) for devmapper thin-pool.
+	// Flatcar's stock image has partitions 1-9. We add partition 10 at the end.
+	// sgdisk -e resizes the GPT to fill the disk first (stock image is for smaller disks).
+	// The partition uses type 0FC63DAF (Linux filesystem) with label r-dm-data.
+	createPartCmd := fmt.Sprintf(`
+		sgdisk -e %q 2>&1 && \
+		END=$(sgdisk -p %q | tail -1 | awk '{print $3}') && \
+		START=$((END + 2048)) && \
+		SIZE_SECTORS=$((200 * 1024 * 1024 * 1024 / 512)) && \
+		sgdisk -n 10:${START}:+${SIZE_SECTORS} -t 10:8300 -c 10:r-dm-data %q 2>&1 && \
+		partprobe %q 2>&1 && sleep 1 && \
+		echo "PARTITION_CREATED"
+	`, disk, disk, disk, disk)
+	if out, err := c.Run(createPartCmd); err != nil {
+		return fmt.Errorf("create r-dm-data partition on %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 4: Mount OEM partition and write Ignition config.
+	// Flatcar's OEM partition is partition 6 (PARTLABEL=OEM).
+	// It may be ext4 or ext2 — mount handles both.
+	oemPart := disk + "p6"
+	writeIgnCmd := fmt.Sprintf(`
+		mkdir -p /mnt/oem && \
+		mount %q /mnt/oem 2>&1 && \
+		cat > /mnt/oem/config.ign << 'IGNEOF'
+%s
+IGNEOF
+		sync && umount /mnt/oem 2>&1 && \
+		echo "IGNITION_WRITTEN"
+	`, oemPart, string(ignitionJSON))
+	if out, err := c.Run(writeIgnCmd); err != nil {
+		return fmt.Errorf("write Ignition to OEM on %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	return nil
+}
+
+// IsFlatcarUp checks if a Flatcar node is booted and SSH-accessible as the `core` user.
+// Returns true if SSH port 22 is reachable AND authentication as `core` succeeds.
+// This distinguishes Flatcar (user=core) from rescue (user=root) and Talos (no SSH).
+func IsFlatcarUp(ip string, privateKey []byte) bool {
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	if err != nil {
+		return false
+	}
+	config := &ssh.ClientConfig{
+		User: "core",
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // known host
+		Timeout:         15 * time.Second,
+	}
+	addr := net.JoinHostPort(ip, strconv.Itoa(rescueSSHPort))
+	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
+	if err != nil {
+		return false
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return false
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
+	client.Close()
+	return true
+}
+
+// CheckFlatcarBootstrapComplete SSHes into a Flatcar node as `core` and checks
+// whether the CAPI bootstrap sentinel file exists, indicating kubeadm join succeeded.
+func CheckFlatcarBootstrapComplete(ip string, privateKey []byte) (bool, error) {
+	signer, err := ssh.ParsePrivateKey(privateKey)
+	if err != nil {
+		return false, fmt.Errorf("parse SSH key: %w", err)
+	}
+	config := &ssh.ClientConfig{
+		User: "core",
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(signer),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // known host
+		Timeout:         connectTimeout,
+	}
+	addr := net.JoinHostPort(ip, strconv.Itoa(rescueSSHPort))
+	conn, err := net.DialTimeout("tcp", addr, connectTimeout)
+	if err != nil {
+		return false, fmt.Errorf("TCP connect to %s: %w", addr, err)
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	if err != nil {
+		conn.Close()
+		return false, fmt.Errorf("SSH handshake to %s: %w", addr, err)
+	}
+	sshClient := ssh.NewClient(sshConn, chans, reqs)
+	defer sshClient.Close()
+
+	sess, err := sshClient.NewSession()
+	if err != nil {
+		return false, fmt.Errorf("new session: %w", err)
+	}
+	defer sess.Close()
+
+	var buf bytes.Buffer
+	sess.Stdout = &buf
+	sess.Stderr = &buf
+
+	// Check sentinel file created by CABPK after successful kubeadm join.
+	if err := sess.Run("test -f /run/cluster-api/bootstrap-success.complete && echo READY || echo WAITING"); err != nil {
+		return false, fmt.Errorf("check bootstrap sentinel: %w\nOutput: %s", err, buf.String())
+	}
+
+	return strings.TrimSpace(buf.String()) == "READY", nil
+}
+
 // IsReachable checks if SSH port 22 is reachable (used to detect rescue mode).
 // Uses a 15-second timeout since Hetzner rescue SSH can be slow to accept connections.
 func IsReachable(ip string) bool {
