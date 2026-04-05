@@ -164,39 +164,32 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
-	// EFI boot order: delete only KNOWN stale entries (Talos, old distros),
-	// then set order: PXE first, all remaining entries second.
-	// Flatcar's GRUB creates an EFI entry with varying names across versions
-	// ("GRUB", "Flatcar", "UEFI OS", etc.) — instead of whitelisting names,
-	// we delete only entries we know are stale and preserve everything else.
+	// EFI boot order: flatcar-install -u already created a proper EFI boot entry
+	// via efibootmgr -c. We just set the order: PXE first (for rescue), Flatcar second.
+	// Also delete stale entries (Talos, old distros) to keep NVRAM clean.
 	if out, err := sshClient.Run(`
 		if command -v efibootmgr > /dev/null 2>&1; then
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
 
-			echo "Before cleanup:"
+			echo "Before:"
 			efibootmgr
 
-			# Delete only KNOWN stale entries — Talos, old distros
-			# Do NOT delete unknown entries (Flatcar GRUB may be named "UEFI OS")
-			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iE 'talos|debian|ubuntu|centos|rocky|alma' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
-				echo "Deleting stale entry: Boot${entry}"
+			# Delete stale entries (Talos, old distros, generic "UEFI OS")
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iE 'talos|debian|ubuntu|centos|rocky|alma|UEFI OS' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
 				efibootmgr -b "$entry" -B 2>/dev/null || true
 			done
 
-			# Set boot order: PXE first, then ALL remaining non-PXE entries.
-			# This guarantees Flatcar boots regardless of its EFI entry name.
+			# Set order: PXE first, Flatcar second, then rest
 			PXE_NUMS=$(efibootmgr | grep -iE 'PXE|Network|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			OTHER_NUMS=$(efibootmgr | grep '^Boot[0-9A-Fa-f]' | grep -ivE 'PXE|Network|IPv4|IPv6' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			if [ -n "$PXE_NUMS" ] && [ -n "$OTHER_NUMS" ]; then
-				efibootmgr -o "${PXE_NUMS},${OTHER_NUMS}" 2>&1
-			elif [ -n "$OTHER_NUMS" ]; then
-				efibootmgr -o "${OTHER_NUMS}" 2>&1
-			elif [ -n "$PXE_NUMS" ]; then
-				efibootmgr -o "${PXE_NUMS}" 2>&1
+			FLATCAR_NUM=$(efibootmgr | grep -i 'Flatcar' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
+			if [ -n "$PXE_NUMS" ] && [ -n "$FLATCAR_NUM" ]; then
+				efibootmgr -o "${PXE_NUMS},${FLATCAR_NUM}" 2>&1
+			elif [ -n "$FLATCAR_NUM" ]; then
+				efibootmgr -o "${FLATCAR_NUM}" 2>&1
 			fi
 
-			echo "After cleanup:"
+			echo "After:"
 			efibootmgr
 		fi
 	`); err != nil {
@@ -217,9 +210,9 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 	// Reboot into Flatcar.
 	sshClient.Run("reboot") //nolint:errcheck // reboot disconnects SSH
 	hrm.Status.ProvisioningState = infrav1.StateInstalling
-	// Flatcar first boot is slower than Talos (runs Ignition, kubeadm join).
-	// Give it 2 minutes before first check.
-	return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+	// Flatcar first boot on Hetzner: PXE timeout ~2-3 min (rescue deactivated,
+	// PXE tries both NICs then fails) + GRUB + kernel + Ignition = ~5 min total.
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
 // stateWaitFlatcarInstall waits for Flatcar to boot after image install.
