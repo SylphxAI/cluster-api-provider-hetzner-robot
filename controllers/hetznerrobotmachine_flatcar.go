@@ -164,6 +164,19 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 		return ctrl.Result{}, fmt.Errorf("install Flatcar on %s: %w", serverIP, err)
 	}
 
+	// Write pre-boot static networkd config to the ROOT partition so the
+	// machine has a working network address before Ignition runs on first boot.
+	// Hetzner dedicated servers have no DHCP — without this, network-online.target
+	// never reaches ONLINE state and Ignition times out trying to download sysexts.
+	// Non-fatal: if the mount fails we log and continue; the machine will fail to
+	// network-online but that's a provisioning failure, not a controller failure.
+	if err := writePreBootNetwork(sshClient, installDisk, hw.PrimaryMAC, serverIP, hw.GatewayIP, hrh.Spec.ServerIPv6Net, internalIP, hrc.Spec.VLANConfig); err != nil {
+		logger.Info("Pre-boot networkd config write failed (non-fatal), machine may fail network-online on first boot",
+			"ip", serverIP, "error", err)
+	} else {
+		logger.Info("Pre-boot networkd config written to ROOT partition", "ip", serverIP)
+	}
+
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
 	// EFI boot order: delete ALL stale entries, re-create one clean Flatcar entry
@@ -538,7 +551,7 @@ func addHetznerPrimaryNetwork(storage map[string]interface{}, primaryMAC, server
 	}
 
 	// IPv4: Hetzner /32 + Peer=gateway (required by Hetzner anti-spoofing).
-	fmt.Fprintf(&network, "\n[Address]\nAddress=%s\nPeer=%s/32\n", serverIP, gatewayIP)
+	fmt.Fprintf(&network, "\n[Address]\nAddress=%s/32\nPeer=%s/32\n", serverIP, gatewayIP)
 
 	// Default route via gateway.
 	fmt.Fprintf(&network, "\n[Route]\nDestination=0.0.0.0/0\nGateway=%s\n", gatewayIP)
@@ -614,6 +627,113 @@ func addSSHAuthorizedKey(ign map[string]interface{}, username, pubKey string) {
 		"sshAuthorizedKeys": []interface{}{pubKey},
 	})
 	passwd["users"] = users
+}
+
+// writePreBootNetwork mounts the Flatcar ROOT partition (p9) from the rescue
+// environment and writes static systemd-networkd config files so that the
+// machine has a working network before Ignition runs on first boot.
+//
+// Why this is necessary: Hetzner dedicated servers have no DHCP — they use
+// static routing. Flatcar boots with DHCP by default. network-online.target
+// therefore never completes, Ignition waits forever (or times out), and sysext
+// downloads from GitHub fail. Writing a pre-boot networkd file gives the
+// machine the correct address so network-online.target succeeds immediately
+// and Ignition can fetch all remote resources.
+//
+// The pre-boot file uses a low priority name (10-static-preboot.network) and
+// matches by MAC. After Ignition runs it writes its own networkd files
+// (10-public.network etc.) which also match by MAC. Both files coexist
+// harmlessly — systemd-networkd applies all matching files in lexicographic
+// order and the values are identical.
+func writePreBootNetwork(
+	sshClient *sshrescue.Client,
+	installDisk string,
+	primaryMAC string,
+	serverIP string,
+	gatewayIP string,
+	ipv6Net string,
+	internalIP string,
+	vlanConfig *infrav1.VLANConfig,
+) error {
+	if serverIP == "" || gatewayIP == "" {
+		return fmt.Errorf("cannot write pre-boot network: serverIP or gatewayIP empty")
+	}
+
+	// Derive p9 (ROOT partition) from the install disk.
+	// Flatcar's disk layout: p1=EFI, p2=BIOS-BOOT, p3=USR-A, p4=USR-B,
+	// p6=OEM, p9=ROOT (active rootfs), p10=r-dm-data (added by CAPHR).
+	// ROOT is always p9 for all NVMe and SATA devices.
+	rootPart := installDisk + "p9"
+
+	mountPoint := "/mnt/flatcar-root"
+
+	// Mount ROOT partition.
+	mountCmd := fmt.Sprintf(
+		"mkdir -p %s && mount %s %s",
+		mountPoint, rootPart, mountPoint,
+	)
+	if out, err := sshClient.Run(mountCmd); err != nil {
+		return fmt.Errorf("mount ROOT partition %s: %w\nOutput: %s", rootPart, err, out)
+	}
+
+	// Ensure unmount happens even on error.
+	unmountCmd := fmt.Sprintf("umount %s 2>/dev/null || true", mountPoint)
+	defer func() { sshClient.Run(unmountCmd) }() //nolint:errcheck // best-effort cleanup
+
+	// Build the primary network file content.
+	var primary strings.Builder
+	fmt.Fprintf(&primary, "[Match]\nMACAddress=%s\n", primaryMAC)
+	fmt.Fprintf(&primary, "\n[Network]\nDNS=185.12.64.1\nDNS=185.12.64.2\n")
+	if vlanConfig != nil {
+		fmt.Fprintf(&primary, "VLAN=vlan%d\n", vlanConfig.ID)
+	}
+	fmt.Fprintf(&primary, "\n[Address]\nAddress=%s/32\nPeer=%s/32\n", serverIP, gatewayIP)
+	fmt.Fprintf(&primary, "\n[Route]\nDestination=0.0.0.0/0\nGateway=%s\n", gatewayIP)
+	if ipv6Net != "" {
+		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
+		ipv6Addr := strings.TrimSuffix(ipv6Prefix, "::") + "::1/64"
+		fmt.Fprintf(&primary, "\n[Address]\nAddress=%s\n", ipv6Addr)
+		fmt.Fprintf(&primary, "\n[Route]\nDestination=::/0\nGateway=fe80::1\n")
+	}
+
+	networkDir := mountPoint + "/etc/systemd/network"
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", networkDir)
+	if out, err := sshClient.Run(mkdirCmd); err != nil {
+		return fmt.Errorf("create networkd dir on ROOT: %w\nOutput: %s", err, out)
+	}
+
+	// Write primary network file via heredoc to avoid shell quoting issues.
+	writeCmd := fmt.Sprintf("cat > %s/10-static-preboot.network << 'NETEOF'\n%sNETEOF",
+		networkDir, primary.String())
+	if out, err := sshClient.Run(writeCmd); err != nil {
+		return fmt.Errorf("write 10-static-preboot.network: %w\nOutput: %s", err, out)
+	}
+
+	// Write VLAN netdev and network files if VLAN is configured.
+	if vlanConfig != nil && internalIP != "" {
+		prefixLen := vlanConfig.PrefixLength
+		if prefixLen == 0 {
+			prefixLen = 24
+		}
+
+		vlanNetdev := fmt.Sprintf("[NetDev]\nName=vlan%d\nKind=vlan\n\n[VLAN]\nId=%d\n",
+			vlanConfig.ID, vlanConfig.ID)
+		writeVlanNetdev := fmt.Sprintf("cat > %s/10-vlan%d.netdev << 'NETEOF'\n%sNETEOF",
+			networkDir, vlanConfig.ID, vlanNetdev)
+		if out, err := sshClient.Run(writeVlanNetdev); err != nil {
+			return fmt.Errorf("write vlan netdev: %w\nOutput: %s", err, out)
+		}
+
+		vlanNetwork := fmt.Sprintf("[Match]\nName=vlan%d\n\n[Network]\nAddress=%s/%d\n",
+			vlanConfig.ID, internalIP, prefixLen)
+		writeVlanNetwork := fmt.Sprintf("cat > %s/10-vlan%d.network << 'NETEOF'\n%sNETEOF",
+			networkDir, vlanConfig.ID, vlanNetwork)
+		if out, err := sshClient.Run(writeVlanNetwork); err != nil {
+			return fmt.Errorf("write vlan network: %w\nOutput: %s", err, out)
+		}
+	}
+
+	return nil
 }
 
 func buildKubeletExtraArgs(providerID, internalIP, ipv6Net string) string {
