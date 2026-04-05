@@ -142,6 +142,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 		hw.PrimaryMAC,
 		hrc.Spec.VLANConfig,
 		sshPubKey,
+		serverIP,
+		hw.GatewayIP,
 	)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("inject Flatcar config: %w", err)
@@ -369,7 +371,7 @@ type IgnitionDropin struct {
 
 // injectFlatcarConfig takes CABPK-generated Ignition JSON and injects
 // CAPHR per-machine config: providerID, nodeIP, VLAN, IPv6, devmapper setup,
-// and SSH authorized keys for the core user.
+// Hetzner static network config, and SSH authorized keys for the core user.
 func injectFlatcarConfig(
 	bootstrapData []byte,
 	providerID string,
@@ -378,6 +380,8 @@ func injectFlatcarConfig(
 	primaryMAC string,
 	vlanConfig *infrav1.VLANConfig,
 	sshPublicKey string,
+	serverIP string,
+	gatewayIP string,
 ) ([]byte, error) {
 	// Parse the Ignition JSON from CABPK.
 	var ign map[string]interface{}
@@ -423,23 +427,22 @@ func injectFlatcarConfig(
 		addKubeletDropin(systemd, kubeletArgs)
 	}
 
-	// ── 4. Inject network config (VLAN + IPv6) as storage files ─────────
-	// Ignition 3.x does NOT support the `networkd` top-level key (removed
-	// after Ignition 2.x / Container Linux Config). Networkd configs must
-	// be written as files under /etc/systemd/network/ via storage.files.
+	// ── 4. Inject Hetzner network config as storage files ───────────────
+	// Ignition 3.x requires networkd config as storage.files.
+	// Hetzner dedicated servers need static /32 IP + Peer=gateway. Custom
+	// networkd files that match by MAC override the default DHCP, so we
+	// MUST include the Hetzner-style static config explicitly.
+
+	if serverIP != "" && gatewayIP != "" {
+		addHetznerPrimaryNetwork(storage, primaryMAC, serverIP, gatewayIP, ipv6Net, vlanConfig)
+	}
 
 	if vlanConfig != nil && internalIP != "" {
 		prefixLen := vlanConfig.PrefixLength
 		if prefixLen == 0 {
 			prefixLen = 24
 		}
-		addNetworkdVLANFiles(storage, vlanConfig.ID, internalIP, prefixLen, primaryMAC)
-	}
-
-	if ipv6Net != "" {
-		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
-		ipv6Addr := ipv6Prefix + "1/64"
-		addNetworkdIPv6File(storage, ipv6Addr, primaryMAC)
+		addVLANNetdevAndNetwork(storage, vlanConfig.ID, internalIP, prefixLen)
 	}
 
 	// ── 5. Inject SSH authorized keys for core user ─────────────────────
@@ -510,55 +513,54 @@ Environment="KUBELET_EXTRA_ARGS=%s"
 	}
 }
 
-// addNetworkdVLANFiles writes VLAN networkd configs as files under /etc/systemd/network/.
-// Ignition 3.x requires networkd config as storage.files, NOT the `networkd` top-level key
-// (which was removed after Ignition 2.x / Container Linux Config).
-func addNetworkdVLANFiles(storage map[string]interface{}, vlanID int, internalIP string, prefixLen int, primaryMAC string) {
-	// VLAN netdev — creates the VLAN virtual device.
-	vlanNetdev := fmt.Sprintf(`[NetDev]
-Name=vlan%d
-Kind=vlan
+// addHetznerPrimaryNetwork writes the primary NIC config as a single consolidated
+// network file. Hetzner requires static /32 + Peer=gateway (anti-spoofing).
+// This file also includes VLAN attachment and IPv6 if configured.
+// Using ONE file per interface avoids systemd-networkd priority conflicts.
+func addHetznerPrimaryNetwork(storage map[string]interface{}, primaryMAC, serverIP, gatewayIP, ipv6Net string, vlanConfig *infrav1.VLANConfig) {
+	var network strings.Builder
 
-[VLAN]
-Id=%d
-`, vlanID, vlanID)
-	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.netdev", vlanID), vlanNetdev, 0o644)
+	// Match by MAC — stable across reboots regardless of interface name.
+	fmt.Fprintf(&network, "[Match]\nMACAddress=%s\n", primaryMAC)
 
-	// VLAN network — assigns IP to the VLAN interface.
-	vlanNetwork := fmt.Sprintf(`[Match]
-Name=vlan%d
+	// Network section: DNS + optional VLAN.
+	fmt.Fprintf(&network, "\n[Network]\nDNS=185.12.64.1\nDNS=185.12.64.2\n")
+	if vlanConfig != nil {
+		fmt.Fprintf(&network, "VLAN=vlan%d\n", vlanConfig.ID)
+	}
 
-[Network]
-Address=%s/%d
-`, vlanID, internalIP, prefixLen)
-	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.network", vlanID), vlanNetwork, 0o644)
+	// IPv4: Hetzner /32 + Peer=gateway (required by Hetzner anti-spoofing).
+	fmt.Fprintf(&network, "\n[Address]\nAddress=%s\nPeer=%s/32\n", serverIP, gatewayIP)
 
-	// Primary NIC — add VLAN to the physical interface matched by MAC.
-	// MUST keep DHCP=yes so the public IPv4 is still assigned. Without it,
-	// this more-specific unit overrides the default Flatcar networkd config
-	// and the server loses its public IP → unreachable via SSH.
-	primaryNetwork := fmt.Sprintf(`[Match]
-MACAddress=%s
+	// Default route via gateway.
+	fmt.Fprintf(&network, "\n[Route]\nDestination=0.0.0.0/0\nGateway=%s\n", gatewayIP)
 
-[Network]
-DHCP=yes
-VLAN=vlan%d
-`, primaryMAC, vlanID)
-	addIgnitionFile(storage, "/etc/systemd/network/05-primary-vlan.network", primaryNetwork, 0o644)
+	// IPv6 if configured.
+	if ipv6Net != "" {
+		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
+		ipv6Addr := strings.TrimSuffix(ipv6Prefix, "::") + "::1/64"
+		fmt.Fprintf(&network, "\n[Address]\nAddress=%s\n", ipv6Addr)
+		fmt.Fprintf(&network, "\n[Route]\nDestination=::/0\nGateway=fe80::1\n")
+	}
+
+	addIgnitionFile(storage, "/etc/systemd/network/10-public.network", network.String(), 0o644)
 }
 
-// addNetworkdIPv6File writes IPv6 networkd config as a file under /etc/systemd/network/.
+// addVLANNetdevAndNetwork creates the VLAN virtual device and assigns the
+// internal IP. The VLAN is attached to the primary NIC via addHetznerPrimaryNetwork.
+func addVLANNetdevAndNetwork(storage map[string]interface{}, vlanID int, internalIP string, prefixLen int) {
+	// VLAN netdev
+	vlanNetdev := fmt.Sprintf("[NetDev]\nName=vlan%d\nKind=vlan\n\n[VLAN]\nId=%d\n", vlanID, vlanID)
+	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.netdev", vlanID), vlanNetdev, 0o644)
+
+	// VLAN network — assigns internal IP
+	vlanNetwork := fmt.Sprintf("[Match]\nName=vlan%d\n\n[Network]\nAddress=%s/%d\n", vlanID, internalIP, prefixLen)
+	addIgnitionFile(storage, fmt.Sprintf("/etc/systemd/network/10-vlan%d.network", vlanID), vlanNetwork, 0o644)
+}
+
+// addNetworkdIPv6File writes standalone IPv6 config (only used when serverIP is empty).
 func addNetworkdIPv6File(storage map[string]interface{}, ipv6Addr, primaryMAC string) {
-	ipv6Network := fmt.Sprintf(`[Match]
-MACAddress=%s
-
-[Network]
-Address=%s
-
-[Route]
-Destination=::/0
-Gateway=fe80::1
-`, primaryMAC, ipv6Addr)
+	ipv6Network := fmt.Sprintf("[Match]\nMACAddress=%s\n\n[Network]\nAddress=%s\n\n[Route]\nDestination=::/0\nGateway=fe80::1\n", primaryMAC, ipv6Addr)
 	addIgnitionFile(storage, "/etc/systemd/network/10-ipv6.network", ipv6Network, 0o644)
 }
 
