@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -828,31 +829,11 @@ func buildKubeletExtraArgs(providerID, internalIP, ipv6Net string) string {
 	return strings.Join(args, " ")
 }
 
-// urlEncode performs minimal URL encoding for Ignition data: URIs.
-// Only encodes characters that must be escaped in data: URIs.
+// urlEncode performs URL encoding for Ignition data: URIs.
+// Uses net/url.PathEscape which encodes all URI-special characters
+// including : / [ ] that have meaning in data: URI parsing.
 func urlEncode(s string) string {
-	var b strings.Builder
-	for _, c := range s {
-		switch {
-		case c == ' ':
-			b.WriteString("%20")
-		case c == '\n':
-			b.WriteString("%0A")
-		case c == '\r':
-			b.WriteString("%0D")
-		case c == '%':
-			b.WriteString("%25")
-		case c == '#':
-			b.WriteString("%23")
-		case c == '&':
-			b.WriteString("%26")
-		case c == '=':
-			b.WriteString("%3D")
-		default:
-			b.WriteRune(c)
-		}
-	}
-	return b.String()
+	return url.PathEscape(s)
 }
 
 // ─── Config Templates ────────────────────────────────────────────────────────

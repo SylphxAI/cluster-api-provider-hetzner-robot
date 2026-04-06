@@ -331,54 +331,53 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk, customImageU
 	return nil
 }
 
-// InstallFlatcar installs Flatcar Container Linux via raw image DD — the same
-// approach as Talos. The UEFI firmware auto-discovers the EFI System Partition
-// on reboot, so no efibootmgr -c is needed.
+// InstallFlatcar installs Flatcar Container Linux using the official
+// flatcar-install script. The -i flag safely writes Ignition to the OEM
+// partition — no manual mount/heredoc/base64 needed.
 //
 // Flow:
-//  1. Download + decompress + DD raw image to disk
-//  2. Re-read partition table (partprobe)
-//  3. Create r-dm-data partition (200GB) for devmapper thin-pool
-//  4. Mount OEM partition and write Ignition JSON
+//  1. Download flatcar-install + install gawk dependency
+//  2. Write Ignition JSON to temp file via base64 (binary-safe)
+//  3. flatcar-install -d <disk> -C <channel> -i <ignition>
+//  4. Add r-dm-data partition (200GB) for devmapper thin-pool
 func (c *Client) InstallFlatcar(channel, disk, customImageURL string, ignitionJSON []byte) error {
 	if channel == "" {
 		channel = "stable"
 	}
 
-	// Step 1: Download and DD raw image to disk.
-	var imageURL string
+	// Step 1: Install flatcar-install + gawk dependency.
+	if out, err := c.Run(`
+		curl -fsSL -o /tmp/flatcar-install https://raw.githubusercontent.com/flatcar/init/flatcar-master/bin/flatcar-install && \
+		chmod +x /tmp/flatcar-install && \
+		apt-get install -y -qq gawk 2>&1 | tail -1 && \
+		echo "SETUP_OK"
+	`); err != nil {
+		return fmt.Errorf("setup flatcar-install: %w\nOutput: %s", err, out)
+	}
+
+	// Step 2: Write Ignition to temp file via base64 (avoids shell escaping).
+	b64 := base64.StdEncoding.EncodeToString(ignitionJSON)
+	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > /tmp/ignition.json && echo IGN_OK", b64)
+	if out, err := c.Run(writeCmd); err != nil {
+		return fmt.Errorf("write Ignition temp file: %w\nOutput: %s", err, out)
+	}
+
+	// Step 3: Run flatcar-install.
+	// -d: target disk, -C: channel, -i: Ignition file (written to OEM by installer)
+	installCmd := fmt.Sprintf("/tmp/flatcar-install -d %s -C %s -i /tmp/ignition.json 2>&1", disk, channel)
 	if customImageURL != "" {
-		imageURL = customImageURL
-	} else {
-		imageURL = fmt.Sprintf(
-			"https://%s.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image.bin.bz2",
-			channel,
-		)
+		// Download custom image first, use -f for local file
+		dlCmd := fmt.Sprintf("curl -fsSL -o /tmp/flatcar-custom.bin.bz2 %q && echo DL_OK", customImageURL)
+		if out, err := c.Run(dlCmd); err != nil {
+			return fmt.Errorf("download custom image: %w\nOutput: %s", err, out)
+		}
+		installCmd = fmt.Sprintf("/tmp/flatcar-install -d %s -f /tmp/flatcar-custom.bin.bz2 -i /tmp/ignition.json 2>&1", disk)
 	}
-	decompressCmd := "bunzip2"
-	if strings.HasSuffix(imageURL, ".xz") {
-		decompressCmd = "xzcat"
-	} else if strings.HasSuffix(imageURL, ".zst") {
-		decompressCmd = "zstdcat"
-	} else if strings.HasSuffix(imageURL, ".gz") {
-		decompressCmd = "gunzip"
-	}
-	installCmd := fmt.Sprintf(
-		"curl -fsSL %q | %s | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
-		imageURL, decompressCmd, disk,
-	)
 	if out, err := c.Run(installCmd); err != nil {
-		return fmt.Errorf("DD Flatcar image to %s: %w\nOutput: %s", disk, err, out)
+		return fmt.Errorf("flatcar-install on %s: %w\nOutput: %s", disk, err, out)
 	}
 
-	// Step 2: Re-read partition table.
-	if out, err := c.Run(fmt.Sprintf("partprobe %q 2>&1; sleep 1", disk)); err != nil {
-		return fmt.Errorf("partprobe on %s: %w\nOutput: %s", disk, err, out)
-	}
-
-	// Step 3: Create r-dm-data partition (200GB) at END of disk.
-	// Expand GPT first, then add partition at the end. On first boot,
-	// Flatcar auto-grows ROOT (p9) to fill space before r-dm-data.
+	// Step 4: Add r-dm-data partition (200GB) at END of disk.
 	createPartCmd := fmt.Sprintf(`
 		sgdisk -e %q 2>&1 && \
 		DISK_END=$(sgdisk -p %q | grep "last usable sector" | awk '{print $NF}') && \
@@ -390,21 +389,6 @@ func (c *Client) InstallFlatcar(channel, disk, customImageURL string, ignitionJS
 	`, disk, disk, disk, disk)
 	if out, err := c.Run(createPartCmd); err != nil {
 		return fmt.Errorf("create r-dm-data partition on %s: %w\nOutput: %s", disk, err, out)
-	}
-
-	// Step 4: Write Ignition to OEM partition (p6).
-	// Use base64 to avoid heredoc shell escaping issues with JSON content.
-	oemPart := disk + "p6"
-	b64 := base64.StdEncoding.EncodeToString(ignitionJSON)
-	writeIgnCmd := fmt.Sprintf(`
-		mkdir -p /mnt/oem && \
-		mount %q /mnt/oem 2>&1 && \
-		echo %q | base64 -d > /mnt/oem/config.ign && \
-		sync && umount /mnt/oem 2>&1 && \
-		echo "IGNITION_WRITTEN"
-	`, oemPart, b64)
-	if out, err := c.Run(writeIgnCmd); err != nil {
-		return fmt.Errorf("write Ignition to OEM on %s: %w\nOutput: %s", disk, err, out)
 	}
 
 	return nil
