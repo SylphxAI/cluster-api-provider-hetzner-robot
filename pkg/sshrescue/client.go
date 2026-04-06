@@ -330,73 +330,54 @@ func (c *Client) InstallTalos(factoryURL, schematic, version, disk, customImageU
 	return nil
 }
 
-// InstallFlatcar installs Flatcar Container Linux using the official flatcar-install
-// script. This is the ONLY reliable method on Hetzner bare metal — raw DD does not
-// work because Hetzner UEFI firmware requires an explicit EFI boot entry created via
-// efibootmgr, which flatcar-install handles with the -u flag.
-//
-// After flatcar-install, we add the r-dm-data partition for devmapper thin-pool.
-// This must happen BEFORE first boot so Flatcar's auto-grow of ROOT stops at r-dm-data
-// instead of filling the entire disk.
+// InstallFlatcar installs Flatcar Container Linux via raw image DD — the same
+// approach as Talos. The UEFI firmware auto-discovers the EFI System Partition
+// on reboot, so no efibootmgr -c is needed.
 //
 // Flow:
-//  1. Download flatcar-install script + install gawk dependency
-//  2. Write Ignition JSON to a temp file
-//  3. Run flatcar-install -d <disk> -C <channel> -i <ignition> -u (creates EFI entry)
-//  4. Add r-dm-data partition (200GB) at end of disk via sgdisk
-//  5. Caller handles EFI boot order + reboot
+//  1. Download + decompress + DD raw image to disk
+//  2. Re-read partition table (partprobe)
+//  3. Create r-dm-data partition (200GB) for devmapper thin-pool
+//  4. Mount OEM partition and write Ignition JSON
 func (c *Client) InstallFlatcar(channel, disk, customImageURL string, ignitionJSON []byte) error {
 	if channel == "" {
 		channel = "stable"
 	}
 
-	// Step 1: Download flatcar-install and install gawk (required dependency).
-	setupCmd := `
-		curl -fsSL -o /tmp/flatcar-install https://raw.githubusercontent.com/flatcar/init/flatcar-master/bin/flatcar-install && \
-		chmod +x /tmp/flatcar-install && \
-		apt-get install -y -qq gawk 2>&1 | tail -1 && \
-		echo "SETUP_OK"
-	`
-	if out, err := c.Run(setupCmd); err != nil {
-		return fmt.Errorf("setup flatcar-install: %w\nOutput: %s", err, out)
-	}
-
-	// Step 2: Write Ignition config to temp file (avoids shell escaping issues).
-	writeIgnCmd := fmt.Sprintf(`cat > /tmp/flatcar-ignition.json << 'IGNEOF'
-%s
-IGNEOF
-echo "IGN_OK"`, string(ignitionJSON))
-	if out, err := c.Run(writeIgnCmd); err != nil {
-		return fmt.Errorf("write Ignition temp file: %w\nOutput: %s", err, out)
-	}
-
-	// Step 3: Run flatcar-install with -u (UEFI boot entry creation).
-	// -d: target disk
-	// -C: release channel (stable/beta/alpha)
-	// -i: Ignition config file (written to OEM partition)
-	// -u: Create UEFI boot entry via efibootmgr — CRITICAL for Hetzner firmware
-	installArgs := fmt.Sprintf("-d %s -C %s -i /tmp/flatcar-ignition.json -u", disk, channel)
+	// Step 1: Download and DD raw image to disk.
+	var imageURL string
 	if customImageURL != "" {
-		// Download custom image and use -f for local file install
-		dlCmd := fmt.Sprintf(
-			"curl -fsSL -o /tmp/flatcar-custom.bin.bz2 %q && echo DL_OK",
-			customImageURL,
+		imageURL = customImageURL
+	} else {
+		imageURL = fmt.Sprintf(
+			"https://%s.release.flatcar-linux.net/amd64-usr/current/flatcar_production_image.bin.bz2",
+			channel,
 		)
-		if out, err := c.Run(dlCmd); err != nil {
-			return fmt.Errorf("download custom Flatcar image: %w\nOutput: %s", err, out)
-		}
-		installArgs = fmt.Sprintf("-d %s -f /tmp/flatcar-custom.bin.bz2 -i /tmp/flatcar-ignition.json -u", disk)
 	}
-
-	installCmd := fmt.Sprintf("/tmp/flatcar-install %s 2>&1", installArgs)
+	decompressCmd := "bunzip2"
+	if strings.HasSuffix(imageURL, ".xz") {
+		decompressCmd = "xzcat"
+	} else if strings.HasSuffix(imageURL, ".zst") {
+		decompressCmd = "zstdcat"
+	} else if strings.HasSuffix(imageURL, ".gz") {
+		decompressCmd = "gunzip"
+	}
+	installCmd := fmt.Sprintf(
+		"curl -fsSL %q | %s | dd of=%q bs=4M conv=notrunc status=progress 2>&1",
+		imageURL, decompressCmd, disk,
+	)
 	if out, err := c.Run(installCmd); err != nil {
-		return fmt.Errorf("flatcar-install on %s: %w\nOutput: %s", disk, err, out)
+		return fmt.Errorf("DD Flatcar image to %s: %w\nOutput: %s", disk, err, out)
 	}
 
-	// Step 4: Add r-dm-data partition (200GB) at END of disk for devmapper thin-pool.
-	// flatcar-install writes the stock image with ROOT (p9) as the last partition.
-	// We expand GPT and add p10 at the very end. On first boot, Flatcar auto-grows
-	// ROOT to fill space BEFORE p10 (not the whole disk).
+	// Step 2: Re-read partition table.
+	if out, err := c.Run(fmt.Sprintf("partprobe %q 2>&1; sleep 1", disk)); err != nil {
+		return fmt.Errorf("partprobe on %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 3: Create r-dm-data partition (200GB) at END of disk.
+	// Expand GPT first, then add partition at the end. On first boot,
+	// Flatcar auto-grows ROOT (p9) to fill space before r-dm-data.
 	createPartCmd := fmt.Sprintf(`
 		sgdisk -e %q 2>&1 && \
 		DISK_END=$(sgdisk -p %q | grep "last usable sector" | awk '{print $NF}') && \
@@ -408,6 +389,21 @@ echo "IGN_OK"`, string(ignitionJSON))
 	`, disk, disk, disk, disk)
 	if out, err := c.Run(createPartCmd); err != nil {
 		return fmt.Errorf("create r-dm-data partition on %s: %w\nOutput: %s", disk, err, out)
+	}
+
+	// Step 4: Write Ignition to OEM partition (p6).
+	oemPart := disk + "p6"
+	writeIgnCmd := fmt.Sprintf(`
+		mkdir -p /mnt/oem && \
+		mount %q /mnt/oem 2>&1 && \
+		cat > /mnt/oem/config.ign << 'IGNEOF'
+%s
+IGNEOF
+		sync && umount /mnt/oem 2>&1 && \
+		echo "IGNITION_WRITTEN"
+	`, oemPart, string(ignitionJSON))
+	if out, err := c.Run(writeIgnCmd); err != nil {
+		return fmt.Errorf("write Ignition to OEM on %s: %w\nOutput: %s", disk, err, out)
 	}
 
 	return nil

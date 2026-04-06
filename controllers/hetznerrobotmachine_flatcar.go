@@ -179,11 +179,10 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
-	// EFI boot order: delete ALL stale entries, re-create one clean Flatcar entry
-	// pointing to the current installDisk, then set PXE first + Flatcar second.
-	// Multiple Flatcar entries from previous installs cause boot failures when
-	// they point to different NVMe disks (enumeration swaps between boots).
-	efiScript := fmt.Sprintf(`
+	// EFI boot order: same as Talos — delete stale non-PXE entries, set PXE first.
+	// The firmware auto-discovers the Flatcar ESP on reboot and boots from it
+	// after PXE fails (rescue deactivated). No efibootmgr -c needed.
+	efiScript := `
 		if command -v efibootmgr > /dev/null 2>&1; then
 			mount -o remount,rw /sys/firmware/efi/efivars 2>/dev/null || \
 			mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || true
@@ -191,30 +190,21 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 			echo "Before:"
 			efibootmgr
 
-			# Delete ALL non-PXE entries (stale Flatcar, Talos, UEFI OS, etc).
-			# flatcar-install -u just created the ONE correct entry. All others
-			# are from previous installs and may point to wrong disks.
-			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -ivE 'PXE|Network|IPv4|IPv6|EFI Shell' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
+			# Delete ALL non-PXE boot entries (stale Flatcar, Talos, UEFI OS, etc)
+			for entry in $(efibootmgr 2>/dev/null | grep '^Boot[0-9A-Fa-f]' | grep -iv 'pxe\|network\|ipv4\|ipv6' | grep -o '^Boot[0-9A-Fa-f]*' | sed 's/Boot//'); do
 				efibootmgr -b "$entry" -B 2>/dev/null || true
 			done
 
-			# Re-create the Flatcar entry fresh (flatcar-install already did this,
-			# but we deleted it above to ensure clean state)
-			efibootmgr -c -d %s -l '\efi\boot\bootx64.efi' -L 'Flatcar' 2>/dev/null || true
-
-			# Set order: PXE first, Flatcar second
-			PXE_NUMS=$(efibootmgr | grep -iE 'PXE|Network|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
-			FLATCAR_NUM=$(efibootmgr | grep -i 'Flatcar' | grep -oP 'Boot\K[0-9A-Fa-f]+' | head -1)
-			if [ -n "$PXE_NUMS" ] && [ -n "$FLATCAR_NUM" ]; then
-				efibootmgr -o "${PXE_NUMS},${FLATCAR_NUM}" 2>&1
-			elif [ -n "$FLATCAR_NUM" ]; then
-				efibootmgr -o "${FLATCAR_NUM}" 2>&1
+			# Set boot order to PXE only — firmware will fallback to disk ESP
+			PXE_NUMS=$(efibootmgr | grep -i 'PXE\|Network\|IPv4' | grep -oP 'Boot\K[0-9A-Fa-f]+' | paste -sd,)
+			if [ -n "$PXE_NUMS" ]; then
+				efibootmgr -o "${PXE_NUMS}" 2>&1
 			fi
 
 			echo "After:"
 			efibootmgr
 		fi
-	`, installDisk)
+	`
 	if out, err := sshClient.Run(efiScript); err != nil {
 		logger.Info("Post-install EFI fix failed (non-fatal)", "error", err, "output", out)
 	} else {
@@ -410,6 +400,12 @@ func injectFlatcarConfig(
 		return nil, fmt.Errorf("parse Ignition JSON: %w", err)
 	}
 
+	// Fix CABPK compatibility: convert "inline" → "source: data:,..." in file contents.
+	// CABPK generates Ignition with "inline" field (spec 3.4.0+), but Flatcar's Ignition
+	// engine uses version 3.3.0 which doesn't support "inline". Without this conversion,
+	// Flatcar rejects the ENTIRE config — no files, no SSH keys, no network.
+	fixIgnitionInlineFields(ign)
+
 	// Ensure top-level structure exists.
 	if _, ok := ign["storage"]; !ok {
 		ign["storage"] = map[string]interface{}{}
@@ -483,6 +479,39 @@ func injectFlatcarConfig(
 }
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
+
+// fixIgnitionInlineFields converts all "inline" fields in file contents to
+// "source: data:,..." URIs. CABPK generates Ignition with "inline" (spec 3.4.0),
+// but Flatcar uses Ignition 3.3.0 which only supports "source".
+func fixIgnitionInlineFields(ign map[string]interface{}) {
+	storage, ok := ign["storage"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	files, ok := storage["files"].([]interface{})
+	if !ok {
+		return
+	}
+	for i, f := range files {
+		file, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		contents, ok := file["contents"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		inline, hasInline := contents["inline"]
+		_, hasSource := contents["source"]
+		if hasInline && !hasSource {
+			contents["source"] = "data:," + urlEncode(fmt.Sprintf("%v", inline))
+			delete(contents, "inline")
+			file["contents"] = contents
+			files[i] = file
+		}
+	}
+	storage["files"] = files
+}
 
 func addIgnitionFile(storage map[string]interface{}, path, content string, mode int) {
 	files := storage["files"].([]interface{})
