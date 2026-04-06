@@ -3,6 +3,7 @@ package sshrescue
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"strconv"
@@ -392,16 +393,16 @@ func (c *Client) InstallFlatcar(channel, disk, customImageURL string, ignitionJS
 	}
 
 	// Step 4: Write Ignition to OEM partition (p6).
+	// Use base64 to avoid heredoc shell escaping issues with JSON content.
 	oemPart := disk + "p6"
+	b64 := base64.StdEncoding.EncodeToString(ignitionJSON)
 	writeIgnCmd := fmt.Sprintf(`
 		mkdir -p /mnt/oem && \
 		mount %q /mnt/oem 2>&1 && \
-		cat > /mnt/oem/config.ign << 'IGNEOF'
-%s
-IGNEOF
+		echo %q | base64 -d > /mnt/oem/config.ign && \
 		sync && umount /mnt/oem 2>&1 && \
 		echo "IGNITION_WRITTEN"
-	`, oemPart, string(ignitionJSON))
+	`, oemPart, b64)
 	if out, err := c.Run(writeIgnCmd); err != nil {
 		return fmt.Errorf("write Ignition to OEM on %s: %w\nOutput: %s", disk, err, out)
 	}
