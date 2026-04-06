@@ -422,19 +422,10 @@ func injectFlatcarConfig(
 		systemd["units"] = []interface{}{}
 	}
 
-	// ── 1. Inject devmapper-pool systemd unit ────────────────────────────
-
-	poolScript := devmapperPoolScript()
-	addIgnitionFile(storage, "/opt/bin/setup-devmapper-pool.sh", poolScript, 0o755)
-
-	addIgnitionUnit(systemd, "devmapper-pool.service", true, devmapperPoolServiceUnit())
-
-	// ── 2. Inject containerd devmapper snapshotter config ────────────────
-
-	containerdConfig := containerdDevmapperConfig()
-	addIgnitionFile(storage, "/etc/containerd/config.d/20-devmapper.toml", containerdConfig, 0o644)
-
-	// ── 3. Inject kubelet extra args (providerID + nodeIP) ───────────────
+	// ── 1. Inject kubelet extra args (providerID + nodeIP) ───────────────
+	// Devmapper, Kata, sysext are handled by the bootstrap template's
+	// preKubeadmCommands — NOT by CAPHR. CAPHR only injects per-machine
+	// config that varies between hosts (providerID, nodeIP, network).
 
 	kubeletArgs := buildKubeletExtraArgs(providerID, internalIP, ipv6Net)
 	if kubeletArgs != "" {
