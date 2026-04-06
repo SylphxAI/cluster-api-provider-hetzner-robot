@@ -170,13 +170,6 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 	// never reaches ONLINE state and Ignition times out trying to download sysexts.
 	// Non-fatal: if the mount fails we log and continue; the machine will fail to
 	// network-online but that's a provisioning failure, not a controller failure.
-	if err := writePreBootNetwork(sshClient, installDisk, hw.PrimaryMAC, serverIP, hw.GatewayIP, hrh.Spec.ServerIPv6Net, internalIP, hrc.Spec.VLANConfig); err != nil {
-		logger.Info("Pre-boot networkd config write failed (non-fatal), machine may fail network-online on first boot",
-			"ip", serverIP, "error", err)
-	} else {
-		logger.Info("Pre-boot networkd config written to ROOT partition", "ip", serverIP)
-	}
-
 	logger.Info("Flatcar installed, fixing EFI boot order", "ip", serverIP)
 
 	// EFI boot order: same as Talos — delete stale non-PXE entries, set PXE first.
