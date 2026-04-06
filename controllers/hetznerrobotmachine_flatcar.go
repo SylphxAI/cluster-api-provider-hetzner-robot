@@ -450,15 +450,11 @@ func injectFlatcarConfig(
 	// MUST include the Hetzner-style static config explicitly.
 
 	if serverIP != "" && gatewayIP != "" {
-		addHetznerPrimaryNetwork(storage, primaryMAC, serverIP, gatewayIP, ipv6Net, vlanConfig)
-	}
-
-	if vlanConfig != nil && internalIP != "" {
-		prefixLen := vlanConfig.PrefixLength
-		if prefixLen == 0 {
-			prefixLen = 24
-		}
-		addVLANNetdevAndNetwork(storage, vlanConfig.ID, internalIP, prefixLen)
+		// VLAN config is NOT included in the initial Ignition. Adding VLAN=vlanX
+		// to the primary NIC causes systemd-networkd to hang if the server is not
+		// yet added to the Hetzner vSwitch. VLAN is configured post-provision
+		// once the node has joined the cluster and is confirmed working.
+		addHetznerPrimaryNetwork(storage, primaryMAC, serverIP, gatewayIP, ipv6Net, nil)
 	}
 
 	// ── 5. Inject SSH authorized keys for core user ─────────────────────
