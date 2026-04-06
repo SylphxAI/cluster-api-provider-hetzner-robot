@@ -406,6 +406,12 @@ func injectFlatcarConfig(
 	// Flatcar rejects the ENTIRE config — no files, no SSH keys, no network.
 	fixIgnitionInlineFields(ign)
 
+	// Remove URL file downloads from Ignition. Ignition uses its own DHCP client
+	// for downloads, which doesn't work on Hetzner (anti-spoofing). Files with
+	// http/https sources (like sysext raw images) must be downloaded post-boot
+	// via preKubeadmCommands instead, when systemd-networkd is configured.
+	removeIgnitionURLDownloads(ign)
+
 	// Ensure top-level structure exists.
 	if _, ok := ign["storage"]; !ok {
 		ign["storage"] = map[string]interface{}{}
@@ -511,6 +517,55 @@ func fixIgnitionInlineFields(ign map[string]interface{}) {
 		}
 	}
 	storage["files"] = files
+}
+
+// removeIgnitionURLDownloads removes files with http/https source URLs from
+// Ignition. Also removes storage.links whose targets are removed files.
+// These files must be downloaded post-boot when networkd is configured.
+func removeIgnitionURLDownloads(ign map[string]interface{}) {
+	storage, ok := ign["storage"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	// Remove files with URL sources
+	removedPaths := map[string]bool{}
+	if files, ok := storage["files"].([]interface{}); ok {
+		var kept []interface{}
+		for _, f := range files {
+			file, ok := f.(map[string]interface{})
+			if !ok {
+				kept = append(kept, f)
+				continue
+			}
+			contents, _ := file["contents"].(map[string]interface{})
+			src, _ := contents["source"].(string)
+			if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+				removedPaths[file["path"].(string)] = true
+				continue // skip this file
+			}
+			kept = append(kept, f)
+		}
+		storage["files"] = kept
+	}
+
+	// Remove links whose targets were removed
+	if links, ok := storage["links"].([]interface{}); ok && len(removedPaths) > 0 {
+		var kept []interface{}
+		for _, l := range links {
+			link, ok := l.(map[string]interface{})
+			if !ok {
+				kept = append(kept, l)
+				continue
+			}
+			target, _ := link["target"].(string)
+			if removedPaths[target] {
+				continue // skip dangling link
+			}
+			kept = append(kept, l)
+		}
+		storage["links"] = kept
+	}
 }
 
 func addIgnitionFile(storage map[string]interface{}, path, content string, mode int) {
