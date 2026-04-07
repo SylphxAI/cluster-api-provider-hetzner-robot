@@ -209,6 +209,12 @@ func ResolveInstallDiskFromInfo(hw *HardwareInfo, configuredDisk string) (string
 		if len(hw.NVMeDisks) == 0 {
 			return configuredDisk, nil // no NVMe disks found — fall back to configured
 		}
+		// If the template explicitly specifies an install disk, trust it.
+		// CAPHR's design is immutable infrastructure: wipe all + fresh install.
+		// The Ceph data on these disks will be wiped anyway (WipeAllDisks).
+		if configuredDisk != "" {
+			return configuredDisk, nil
+		}
 		return "", fmt.Errorf("all NVMe disks have Ceph BlueStore data — cannot determine install disk safely")
 	}
 
