@@ -295,6 +295,7 @@ func (r *HetznerRobotMachineReconciler) stateWaitFlatcarBoot(
 	logger.Info("Flatcar bootstrap complete, node joined cluster", "ip", serverIP)
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
+	hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
 
 	if util.IsControlPlaneMachine(machine) {
 		logger.Info("Control plane Flatcar machine provisioned", "ip", serverIP)

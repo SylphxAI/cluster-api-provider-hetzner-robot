@@ -594,6 +594,7 @@ func (r *HetznerRobotMachineReconciler) stateWaitForBoot(
 	// CPs join etcd automatically via the endpoints in their machineconfig.
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
+	hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
 	if util.IsControlPlaneMachine(machine) {
 		logger.Info("Control plane machine provisioned — CACPPT handles etcd join", "ip", serverIP)
 	} else {

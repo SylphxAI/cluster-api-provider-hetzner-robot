@@ -260,6 +260,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	// If already provisioned, just ensure status is correct
 	if hrm.Status.ProvisioningState == infrav1.StateProvisioned {
 		hrm.Status.Ready = true
+		hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
 		// Ensure HRH state is also marked Provisioned (idempotent)
 		if hrm.Status.HostRef != "" {
 			if err := r.updateHostState(ctx, hrm.Namespace, hrm.Status.HostRef, infrav1.HostStateProvisioned); err != nil {

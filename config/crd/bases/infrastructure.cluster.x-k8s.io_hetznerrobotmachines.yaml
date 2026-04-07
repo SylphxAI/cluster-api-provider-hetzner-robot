@@ -265,6 +265,17 @@ spec:
                   HostRef tracks which HetznerRobotHost was claimed by this machine.
                   Set by the controller during ClaimHost state.
                 type: string
+              initialization:
+                description: |-
+                  Initialization tracks provisioning status for the CAPI v1beta2 contract.
+                  CAPI v1.12+ reads status.initialization.provisioned instead of status.ready.
+                properties:
+                  provisioned:
+                    description: |-
+                      Provisioned indicates the infrastructure has been provisioned.
+                      CAPI v1beta2 reads this field (not status.ready) to determine InfrastructureReady.
+                    type: boolean
+                type: object
               lastResetTime:
                 description: |-
                   LastResetTime records when the last hardware reset was issued for this machine.
@@ -298,7 +309,9 @@ spec:
                 description: ProvisioningState is the current state of provisioning.
                 type: string
               ready:
-                description: Ready indicates the machine is provisioned and healthy.
+                description: |-
+                  Ready indicates the machine is provisioned and healthy.
+                  Used by CAPI v1beta1 contract. Kept for backward compat.
                 type: boolean
               resolvedInstallDisk:
                 description: |-

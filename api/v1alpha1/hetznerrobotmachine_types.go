@@ -99,11 +99,26 @@ type HetznerRobotMachineSpec struct {
 	EphemeralSize string `json:"ephemeralSize,omitempty"`
 }
 
+// InfrastructureMachineInitialization defines the initialization status.
+// Required by the CAPI v1beta2 infrastructure machine contract.
+type InfrastructureMachineInitialization struct {
+	// Provisioned indicates the infrastructure has been provisioned.
+	// CAPI v1beta2 reads this field (not status.ready) to determine InfrastructureReady.
+	// +optional
+	Provisioned bool `json:"provisioned,omitempty"`
+}
+
 // HetznerRobotMachineStatus defines the observed state of HetznerRobotMachine.
 type HetznerRobotMachineStatus struct {
 	// Ready indicates the machine is provisioned and healthy.
+	// Used by CAPI v1beta1 contract. Kept for backward compat.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
+
+	// Initialization tracks provisioning status for the CAPI v1beta2 contract.
+	// CAPI v1.12+ reads status.initialization.provisioned instead of status.ready.
+	// +optional
+	Initialization *InfrastructureMachineInitialization `json:"initialization,omitempty"`
 
 	// Addresses is the list of addresses for this machine.
 	// +optional
