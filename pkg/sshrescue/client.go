@@ -252,6 +252,10 @@ func (c *Client) WipeAllDisks(disks []string) (string, error) {
 			`(wipefs -af "$d" 2>/dev/null; `+
 			`sgdisk --zap-all "$d" 2>/dev/null; `+
 			`dd if=/dev/zero of="$d" bs=1M count=100 conv=notrunc 2>/dev/null; `+
+			`DISK_SIZE=$(blockdev --getsize64 "$d" 2>/dev/null); `+
+			`if [ -n "$DISK_SIZE" ] && [ "$DISK_SIZE" -gt 104857600 ]; then `+
+			`dd if=/dev/zero of="$d" bs=1M count=100 seek=$(( (DISK_SIZE / 1048576) - 100 )) conv=notrunc 2>/dev/null; `+
+			`fi; `+
 			`blkdiscard "$d" 2>/dev/null; `+
 			`sync; `+
 			`echo "WIPED=$d") & `+
