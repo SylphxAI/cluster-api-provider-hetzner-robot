@@ -13,6 +13,7 @@ import (
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 	"github.com/SylphxAI/cluster-api-provider-hetzner-robot/pkg/robot"
@@ -296,6 +297,7 @@ func (r *HetznerRobotMachineReconciler) stateWaitFlatcarBoot(
 	hrm.Status.ProvisioningState = infrav1.StateProvisioned
 	hrm.Status.Ready = true
 	hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
+	conditions.MarkTrue(hrm, infrav1.ReadyCondition)
 
 	if util.IsControlPlaneMachine(machine) {
 		logger.Info("Control plane Flatcar machine provisioned", "ip", serverIP)

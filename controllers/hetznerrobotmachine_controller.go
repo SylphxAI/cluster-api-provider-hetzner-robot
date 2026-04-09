@@ -17,6 +17,7 @@ import (
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/patch"
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
@@ -137,6 +138,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			hrm.Status.FailureReason = &reason
 			hrm.Status.ProvisioningState = infrav1.StateError
 			hrm.Status.Ready = false
+			conditions.MarkFalse(hrm, infrav1.ReadyCondition, "ProvisionTimeout", clusterv1.ConditionSeverityError, "%s", msg)
 			logger.Info("Provision timeout exceeded, entering terminal StateError",
 				"timeout", provisionTimeout, "started", hrm.Status.ProvisionStarted.Time,
 				"state", hrm.Status.ProvisioningState, "action", "manual_intervention_required")
@@ -171,6 +173,7 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 			hrm.Status.FailureReason = &reason
 			hrm.Status.ProvisioningState = infrav1.StateError
 			hrm.Status.Ready = false
+			conditions.MarkFalse(hrm, infrav1.ReadyCondition, "PermanentError", clusterv1.ConditionSeverityError, "%s", msg)
 			logger.Error(err, "Permanent error, entering terminal StateError",
 				"state", hrm.Status.ProvisioningState)
 			return ctrl.Result{}, nil
@@ -192,6 +195,10 @@ func (r *HetznerRobotMachineReconciler) Reconcile(ctx context.Context, req ctrl.
 	hrm.Status.FailureMessage = nil
 	hrm.Status.FailureReason = nil
 	hrm.Status.LastRetryTimestamp = nil
+	// Set provisioning condition if not yet provisioned (provisioned state sets Ready=True in state machine)
+	if hrm.Status.ProvisioningState != infrav1.StateProvisioned {
+		conditions.MarkFalse(hrm, infrav1.ReadyCondition, "Provisioning", clusterv1.ConditionSeverityInfo, "Machine is being provisioned")
+	}
 	return result, nil
 }
 
@@ -261,6 +268,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	if hrm.Status.ProvisioningState == infrav1.StateProvisioned {
 		hrm.Status.Ready = true
 		hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
+		conditions.MarkTrue(hrm, infrav1.ReadyCondition)
 		// Ensure HRH state is also marked Provisioned (idempotent)
 		if hrm.Status.HostRef != "" {
 			if err := r.updateHostState(ctx, hrm.Namespace, hrm.Status.HostRef, infrav1.HostStateProvisioned); err != nil {
@@ -364,20 +372,14 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	logger := log.FromContext(ctx)
 	hrm.Status.ProvisioningState = infrav1.StateDeleting
 
-	// Look up the already-claimed host to get serverID for hardware reset.
-	// IMPORTANT: Do NOT call resolveHost() here — it can claim a new Available
-	// host when Status.HostRef is empty, causing CAPHR to reset the WRONG server.
-	// During deletion we only care about the host we already own.
-	var serverID int
-	if hrm.Status.HostRef != "" {
-		hrh := &infrav1.HetznerRobotHost{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, hrh); err != nil {
-			logger.Error(err, "Failed to fetch claimed host during deletion, skipping hardware reset", "hostRef", hrm.Status.HostRef)
-		} else {
-			serverID = hrh.Spec.ServerID
-		}
+	// Resolve the claimed host to get serverID for hardware reset.
+	// Best-effort: if host can't be resolved, log and proceed to remove finalizer.
+	hrh, resolveErr := r.resolveHost(ctx, hrm)
+	serverID := 0
+	if resolveErr != nil {
+		logger.Error(resolveErr, "Failed to resolve host during delete, will skip hardware reset")
 	} else {
-		logger.Info("No hostRef set, skipping hardware reset (machine was never fully provisioned)")
+		serverID = hrh.Spec.ServerID
 	}
 	logger.Info("Deleting HetznerRobotMachine", "serverID", serverID, "nodeName", machine.Status.NodeRef)
 

@@ -6,7 +6,12 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
-const ClusterFinalizer = "hetznerrobotcluster.infrastructure.cluster.x-k8s.io"
+const (
+	ClusterFinalizer = "hetznerrobotcluster.infrastructure.cluster.x-k8s.io"
+
+	// ClusterReadyCondition reports on the overall readiness of the HetznerRobotCluster.
+	ClusterReadyCondition clusterv1.ConditionType = "Ready"
+)
 
 // VLANConfig defines an internal VLAN network to be injected into Talos machineconfigs.
 // When set, CAPHR injects a VLAN interface entry during ApplyConfig, ensuring

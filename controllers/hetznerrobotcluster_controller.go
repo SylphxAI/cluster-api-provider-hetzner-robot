@@ -12,6 +12,7 @@ import (
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/patch"
 
 	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
@@ -91,10 +92,12 @@ func (r *HetznerRobotClusterReconciler) reconcileNormal(
 	if hrc.Spec.ControlPlaneEndpoint.Host == "" {
 		// Wait for first control plane machine to set the endpoint
 		log.FromContext(ctx).Info("Control plane endpoint not yet set, waiting for control plane machines")
+		conditions.MarkFalse(hrc, infrav1.ClusterReadyCondition, "WaitingForControlPlaneEndpoint", clusterv1.ConditionSeverityInfo, "Control plane endpoint not yet available")
 		return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 	}
 
 	hrc.Status.Ready = true
+	conditions.MarkTrue(hrc, infrav1.ClusterReadyCondition)
 	return ctrl.Result{}, nil
 }
 

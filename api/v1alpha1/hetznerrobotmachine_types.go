@@ -8,6 +8,11 @@ import (
 
 const (
 	MachineFinalizer = "hetznerrobotmachine.infrastructure.cluster.x-k8s.io"
+
+	// ReadyCondition reports on the overall readiness of the HetznerRobotMachine.
+	// Used by CAPI v1beta2 to surface terminal failures (ProvisionTimeout, PermanentError)
+	// so MachineHealthCheck can detect and remediate stuck machines.
+	ReadyCondition clusterv1.ConditionType = "Ready"
 )
 
 // ProvisioningState represents the current state of the machine provisioning.
