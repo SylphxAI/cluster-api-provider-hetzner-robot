@@ -364,14 +364,20 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	logger := log.FromContext(ctx)
 	hrm.Status.ProvisioningState = infrav1.StateDeleting
 
-	// Resolve the claimed host to get serverID for hardware reset.
-	// Best-effort: if host can't be resolved, log and proceed to remove finalizer.
-	hrh, resolveErr := r.resolveHost(ctx, hrm)
-	serverID := 0
-	if resolveErr != nil {
-		logger.Error(resolveErr, "Failed to resolve host during delete, will skip hardware reset")
+	// Look up the already-claimed host to get serverID for hardware reset.
+	// IMPORTANT: Do NOT call resolveHost() here — it can claim a new Available
+	// host when Status.HostRef is empty, causing CAPHR to reset the WRONG server.
+	// During deletion we only care about the host we already own.
+	var serverID int
+	if hrm.Status.HostRef != "" {
+		hrh := &infrav1.HetznerRobotHost{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, hrh); err != nil {
+			logger.Error(err, "Failed to fetch claimed host during deletion, skipping hardware reset", "hostRef", hrm.Status.HostRef)
+		} else {
+			serverID = hrh.Spec.ServerID
+		}
 	} else {
-		serverID = hrh.Spec.ServerID
+		logger.Info("No hostRef set, skipping hardware reset (machine was never fully provisioned)")
 	}
 	logger.Info("Deleting HetznerRobotMachine", "serverID", serverID, "nodeName", machine.Status.NodeRef)
 
