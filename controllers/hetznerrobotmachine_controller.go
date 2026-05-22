@@ -372,12 +372,15 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	logger := log.FromContext(ctx)
 	hrm.Status.ProvisioningState = infrav1.StateDeleting
 
-	// Resolve the claimed host to get serverID for hardware reset.
-	// Best-effort: if host can't be resolved, log and proceed to remove finalizer.
-	hrh, resolveErr := r.resolveHost(ctx, hrm)
+	// Resolve the host to get serverID for hardware reset without claiming a new
+	// host. Delete reconciliation may reset the resolved server through Robot;
+	// selector-based claiming is only safe during provisioning.
+	hrh, shouldReleaseHost, resolveErr := r.resolveHostForDelete(ctx, hrm)
 	serverID := 0
 	if resolveErr != nil {
 		logger.Error(resolveErr, "Failed to resolve host during delete, will skip hardware reset")
+	} else if hrh == nil {
+		logger.Info("No claimed or directly referenced host found during delete; skipping hardware reset")
 	} else {
 		serverID = hrh.Spec.ServerID
 	}
@@ -435,11 +438,11 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	}
 
 	// Release the claimed host back to Available so it can be reused.
-	if hrm.Status.HostRef != "" {
-		if err := r.releaseHost(ctx, hrm.Namespace, hrm.Status.HostRef); err != nil {
-			logger.Error(err, "Failed to release host, removing finalizer anyway", "host", hrm.Status.HostRef)
+	if shouldReleaseHost && hrh != nil {
+		if err := r.releaseHost(ctx, hrm.Namespace, hrh.Name); err != nil {
+			logger.Error(err, "Failed to release host, removing finalizer anyway", "host", hrh.Name)
 		} else {
-			logger.Info("Released host back to Available", "host", hrm.Status.HostRef)
+			logger.Info("Released host back to Available", "host", hrh.Name)
 		}
 	}
 

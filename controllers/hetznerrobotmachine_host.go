@@ -122,6 +122,60 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 	return hrh, nil
 }
 
+// resolveHostForDelete finds the physical host for deletion without claiming
+// any new host. Delete reconciliation can trigger Robot rescue + hardware reset,
+// so it must never call resolveHost() when status.hostRef is empty: selector
+// based claiming in a delete path can reset an unrelated available bare-metal
+// server.
+func (r *HetznerRobotMachineReconciler) resolveHostForDelete(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+) (*infrav1.HetznerRobotHost, bool, error) {
+	if hrm.Status.HostRef != "" {
+		hrh := &infrav1.HetznerRobotHost{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, hrh); err != nil {
+			return nil, false, fmt.Errorf("get claimed host %s: %w", hrm.Status.HostRef, err)
+		}
+		return hrh, true, nil
+	}
+
+	if hrm.Spec.HostRef != nil && hrm.Spec.HostRef.Name != "" {
+		hrh := &infrav1.HetznerRobotHost{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Spec.HostRef.Name}, hrh); err != nil {
+			return nil, false, fmt.Errorf("get directly referenced host %s: %w", hrm.Spec.HostRef.Name, err)
+		}
+		if hostIsClaimedBy(hrh, hrm) {
+			return hrh, true, nil
+		}
+		return nil, false, nil
+	}
+
+	if hrm.Spec.HostSelector != nil {
+		selector, err := metav1.LabelSelectorAsSelector(hrm.Spec.HostSelector)
+		if err != nil {
+			return nil, false, fmt.Errorf("invalid hostSelector: %w", err)
+		}
+		list := &infrav1.HetznerRobotHostList{}
+		if err := r.List(ctx, list, client.InNamespace(hrm.Namespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+			return nil, false, fmt.Errorf("list hosts by selector: %w", err)
+		}
+		for i := range list.Items {
+			h := &list.Items[i]
+			if hostIsClaimedBy(h, hrm) {
+				return h, true, nil
+			}
+		}
+	}
+
+	return nil, false, nil
+}
+
+func hostIsClaimedBy(host *infrav1.HetznerRobotHost, hrm *infrav1.HetznerRobotMachine) bool {
+	return host.Status.MachineRef != nil &&
+		host.Status.MachineRef.Name == hrm.Name &&
+		host.Status.MachineRef.Namespace == hrm.Namespace
+}
+
 // releaseHost returns a HetznerRobotHost to the pool in a clean state.
 // Clears all machine-specific state so the next claim gets a clean slate.
 func (r *HetznerRobotMachineReconciler) releaseHost(ctx context.Context, namespace, hostName string) error {

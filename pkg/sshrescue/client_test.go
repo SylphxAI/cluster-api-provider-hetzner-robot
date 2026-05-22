@@ -749,14 +749,28 @@ func TestResolveInstallDiskFromInfo_SwappedDisk(t *testing.T) {
 	}
 }
 
-func TestResolveInstallDiskFromInfo_AllCeph(t *testing.T) {
+func TestResolveInstallDiskFromInfo_AllCephTrustsConfiguredDisk(t *testing.T) {
 	hw := &HardwareInfo{
 		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
 		CephDisks: map[string]bool{"/dev/nvme0n1": true, "/dev/nvme1n1": true},
 	}
-	_, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	disk, err := ResolveInstallDiskFromInfo(hw, "/dev/nvme0n1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if disk != "/dev/nvme0n1" {
+		t.Errorf("expected configured disk, got %q", disk)
+	}
+}
+
+func TestResolveInstallDiskFromInfo_AllCephWithoutConfiguredDisk(t *testing.T) {
+	hw := &HardwareInfo{
+		NVMeDisks: []string{"/dev/nvme0n1", "/dev/nvme1n1"},
+		CephDisks: map[string]bool{"/dev/nvme0n1": true, "/dev/nvme1n1": true},
+	}
+	_, err := ResolveInstallDiskFromInfo(hw, "")
 	if err == nil {
-		t.Fatal("expected error when all disks have Ceph")
+		t.Fatal("expected error when all disks have Ceph and no configured disk is provided")
 	}
 	if !strings.Contains(err.Error(), "all NVMe disks have Ceph BlueStore data") {
 		t.Errorf("unexpected error: %v", err)
