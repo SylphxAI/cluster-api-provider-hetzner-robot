@@ -17,6 +17,8 @@ jobs:
     runs-on: sylphx-linux-standard
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -25,9 +27,23 @@ jobs:
 
       - name: Check gofmt
         run: |
-          files="$(gofmt -l .)"
-          if [ -n "$files" ]; then
-            echo "$files"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              base="$(git merge-base origin/main HEAD)"
+            fi
+          fi
+
+          files="$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.go')"
+          if [ -z "$files" ]; then
+            exit 0
+          fi
+
+          unformatted="$(gofmt -l $files)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
             exit 1
           fi
 
