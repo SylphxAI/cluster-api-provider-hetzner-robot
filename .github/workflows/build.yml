@@ -5,7 +5,10 @@ on:
     tags: ["v*"]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Dogfood Sylphx CI Compute. Repo-owned workflows must not use
+    # GitHub-hosted runners because hosted minutes are not part of the Sylphx
+    # delivery budget.
+    runs-on: sylphx-linux-large
     permissions:
       contents: write
       packages: write

@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+    tags-ignore:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Dogfood Sylphx CI Compute. Do not use GitHub-hosted runners.
+    runs-on: sylphx-linux-standard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
