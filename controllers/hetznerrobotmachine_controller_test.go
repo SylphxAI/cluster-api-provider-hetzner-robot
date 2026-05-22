@@ -1,9 +1,18 @@
 package controllers
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	infrav1 "github.com/SylphxAI/cluster-api-provider-hetzner-robot/api/v1alpha1"
 )
 
 func TestIsPermanentError(t *testing.T) {
@@ -260,4 +269,201 @@ func TestComputeBackoff_NegativeRetryCount(t *testing.T) {
 	if got != 30*time.Second {
 		t.Errorf("computeBackoff(-100) = %v, want 30s", got)
 	}
+}
+
+func TestResolveHostForDeleteDoesNotClaimAvailableSelectorHost(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "phantom-cp",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			HostSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "control-plane"},
+			},
+		},
+	}
+	availableHost := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "future-cp-host",
+			Namespace: "caphr",
+			Labels:    map[string]string{"role": "control-plane"},
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, availableHost).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	host, shouldRelease, err := reconciler.resolveHostForDelete(ctx, hrm)
+	if err != nil {
+		t.Fatalf("resolveHostForDelete returned error: %v", err)
+	}
+	if host != nil {
+		t.Fatalf("resolveHostForDelete claimed or returned host %q; want nil", host.Name)
+	}
+	if shouldRelease {
+		t.Fatal("resolveHostForDelete returned shouldRelease=true for an unclaimed selector host")
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "future-cp-host"), after); err != nil {
+		t.Fatalf("get host after resolve: %v", err)
+	}
+	if after.Status.State != infrav1.HostStateAvailable {
+		t.Fatalf("host state changed to %q; want Available", after.Status.State)
+	}
+	if after.Status.MachineRef != nil {
+		t.Fatalf("host MachineRef changed to %#v; want nil", after.Status.MachineRef)
+	}
+}
+
+func TestResolveHostForDeleteFindsAlreadyClaimedSelectorHost(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claimed-cp",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			HostSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "control-plane"},
+			},
+		},
+	}
+	claimedHost := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claimed-cp-host",
+			Namespace: "caphr",
+			Labels:    map[string]string{"role": "control-plane"},
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateClaimed,
+			MachineRef: &infrav1.MachineReference{
+				Name:      "claimed-cp",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, claimedHost).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	host, shouldRelease, err := reconciler.resolveHostForDelete(ctx, hrm)
+	if err != nil {
+		t.Fatalf("resolveHostForDelete returned error: %v", err)
+	}
+	if host == nil || host.Name != "claimed-cp-host" {
+		t.Fatalf("resolveHostForDelete returned host %v; want claimed-cp-host", host)
+	}
+	if !shouldRelease {
+		t.Fatal("resolveHostForDelete returned shouldRelease=false for a host claimed by this HRM")
+	}
+}
+
+func TestResolveHostForDeleteUsesStatusHostRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopted-cp",
+			Namespace: "caphr",
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			HostRef: "cp-host",
+		},
+	}
+	hostRef := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-host",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, hostRef).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	host, shouldRelease, err := reconciler.resolveHostForDelete(ctx, hrm)
+	if err != nil {
+		t.Fatalf("resolveHostForDelete returned error: %v", err)
+	}
+	if host == nil || host.Name != "cp-host" {
+		t.Fatalf("resolveHostForDelete returned host %v; want cp-host", host)
+	}
+	if !shouldRelease {
+		t.Fatal("resolveHostForDelete returned shouldRelease=false for status.hostRef")
+	}
+}
+
+func TestResolveHostForDeleteDoesNotUseUnclaimedSpecHostRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unclaimed-cp",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			HostRef: &corev1.LocalObjectReference{Name: "cp-host"},
+		},
+	}
+	hostRef := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-host",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, hostRef).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	host, shouldRelease, err := reconciler.resolveHostForDelete(ctx, hrm)
+	if err != nil {
+		t.Fatalf("resolveHostForDelete returned error: %v", err)
+	}
+	if host != nil {
+		t.Fatalf("resolveHostForDelete returned unclaimed spec.hostRef host %q; want nil", host.Name)
+	}
+	if shouldRelease {
+		t.Fatal("resolveHostForDelete returned shouldRelease=true for an unclaimed spec.hostRef host")
+	}
+}
+
+func clientKey(namespace, name string) client.ObjectKey {
+	return client.ObjectKey{Namespace: namespace, Name: name}
 }
