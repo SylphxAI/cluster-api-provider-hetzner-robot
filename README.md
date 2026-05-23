@@ -240,7 +240,9 @@ For adopted Machines that predate Host ownership, CAPHR may backfill
 `status.hostRef` and Host `consumerRef` without rescue, reset, or reinstall, but
 only when the Machine `providerID` (`hetzner-robot://<serverID>`) exactly
 matches the selected Host `spec.serverID`. Selector-only adoption never claims a
-different physical server.
+different physical server. If only the legacy Host `status.machineRef` points to
+a deleted Machine, CAPHR may repair the Host owner to the matching provisioned
+Machine; a live `consumerRef` or live legacy owner is never stolen.
 
 ### HetznerRobotMachine
 

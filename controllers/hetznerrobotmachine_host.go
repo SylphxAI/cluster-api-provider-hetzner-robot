@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -169,8 +170,11 @@ func (r *HetznerRobotMachineReconciler) backfillProvisionedHostClaim(
 		)
 	}
 
-	ref := currentHostConsumerRef(host)
-	if ref != nil && !machineReferenceMatches(ref, hrm) {
+	ref, err := r.blockingHostOwnerRef(ctx, host, hrm)
+	if err != nil {
+		return false, err
+	}
+	if ref != nil {
 		return false, fmt.Errorf("host %s is claimed by %s/%s", host.Name, ref.Namespace, ref.Name)
 	}
 	if host.Status.State == infrav1.HostStateClaimed && ref == nil {
@@ -206,8 +210,11 @@ func (r *HetznerRobotMachineReconciler) ensureProvisionedHostStatus(
 		return fmt.Errorf("get provisioned host %s: %w", hrm.Status.HostRef, err)
 	}
 
-	ref := currentHostConsumerRef(host)
-	if ref != nil && !machineReferenceMatches(ref, hrm) {
+	ref, err := r.blockingHostOwnerRef(ctx, host, hrm)
+	if err != nil {
+		return err
+	}
+	if ref != nil {
 		return fmt.Errorf("host %s is claimed by %s/%s, not %s/%s", host.Name, ref.Namespace, ref.Name, hrm.Namespace, hrm.Name)
 	}
 	if host.Status.State == infrav1.HostStateProvisioned &&
@@ -385,6 +392,42 @@ func currentHostConsumerRef(host *infrav1.HetznerRobotHost) *infrav1.MachineRefe
 		return host.Status.MachineRef.DeepCopy()
 	}
 	return nil
+}
+
+func (r *HetznerRobotMachineReconciler) blockingHostOwnerRef(
+	ctx context.Context,
+	host *infrav1.HetznerRobotHost,
+	hrm *infrav1.HetznerRobotMachine,
+) (*infrav1.MachineReference, error) {
+	if host.Status.ConsumerRef != nil {
+		if machineReferenceMatches(host.Status.ConsumerRef, hrm) {
+			return nil, nil
+		}
+		return host.Status.ConsumerRef.DeepCopy(), nil
+	}
+	if host.Status.MachineRef == nil || machineReferenceMatches(host.Status.MachineRef, hrm) {
+		return nil, nil
+	}
+
+	legacyRef := host.Status.MachineRef.DeepCopy()
+	expectedServerID, hasProviderID := robotServerIDFromProviderID(hrm.Spec.ProviderID)
+	if !hasProviderID || host.Spec.ServerID != expectedServerID {
+		return legacyRef, nil
+	}
+
+	legacyNamespace := legacyRef.Namespace
+	if legacyNamespace == "" {
+		legacyNamespace = host.Namespace
+	}
+	legacyHRM := &infrav1.HetznerRobotMachine{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: legacyNamespace, Name: legacyRef.Name}, legacyHRM)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return legacyRef, fmt.Errorf("get legacy host owner %s/%s: %w", legacyNamespace, legacyRef.Name, err)
+	}
+	return legacyRef, nil
 }
 
 func setHostConsumerRef(host *infrav1.HetznerRobotHost, ref *infrav1.MachineReference) {

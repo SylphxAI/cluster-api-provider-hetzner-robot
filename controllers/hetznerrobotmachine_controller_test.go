@@ -1023,6 +1023,125 @@ func TestEnsureProvisionedHostStatusBackfillsConsumerRef(t *testing.T) {
 	}
 }
 
+func TestEnsureProvisionedHostStatusRepairsStaleLegacyMachineRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2964884"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-storage-6",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			HostRef:           "storage-6",
+			ProvisioningState: infrav1.StateProvisioned,
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-6",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 2964884,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+			MachineRef: &infrav1.MachineReference{
+				Name:      "talos-production-storage-slz87-vcsrp",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	if err := reconciler.ensureProvisionedHostStatus(ctx, hrm); err != nil {
+		t.Fatalf("ensureProvisionedHostStatus returned error: %v", err)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "storage-6"), after); err != nil {
+		t.Fatalf("get host after ensure: %v", err)
+	}
+	if after.Status.ConsumerRef == nil || after.Status.ConsumerRef.Name != "adopt-storage-6" {
+		t.Fatalf("ConsumerRef = %#v; want adopt-storage-6", after.Status.ConsumerRef)
+	}
+	if after.Status.MachineRef == nil || after.Status.MachineRef.Name != "adopt-storage-6" {
+		t.Fatalf("MachineRef = %#v; want adopt-storage-6", after.Status.MachineRef)
+	}
+}
+
+func TestEnsureProvisionedHostStatusDoesNotStealLiveLegacyMachineRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2964884"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-storage-6",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			HostRef:           "storage-6",
+			ProvisioningState: infrav1.StateProvisioned,
+		},
+	}
+	liveOwner := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "talos-production-storage-slz87-vcsrp",
+			Namespace: "caphr",
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-6",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 2964884,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+			MachineRef: &infrav1.MachineReference{
+				Name:      "talos-production-storage-slz87-vcsrp",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, liveOwner, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	err := reconciler.ensureProvisionedHostStatus(ctx, hrm)
+	if err == nil {
+		t.Fatal("ensureProvisionedHostStatus returned nil error; want claimed-by-live-owner")
+	}
+	if !strings.Contains(err.Error(), "claimed by caphr/talos-production-storage-slz87-vcsrp") {
+		t.Fatalf("error = %v; want claimed-by-live-owner", err)
+	}
+}
+
 func TestReleaseHostTracksLastConsumerRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
