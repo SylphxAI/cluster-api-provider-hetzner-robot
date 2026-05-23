@@ -266,14 +266,27 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 
 	// If already provisioned, just ensure status is correct
 	if hrm.Status.ProvisioningState == infrav1.StateProvisioned {
+		if hrm.Status.HostRef == "" {
+			backfilled, err := r.backfillProvisionedHostClaim(ctx, hrm)
+			if err != nil {
+				logger.Info("Provisioned host ownership backfill is pending",
+					"error", err.Error(),
+					"providerID", hrm.Spec.ProviderID)
+			} else if backfilled {
+				logger.Info("Backfilled provisioned host ownership", "host", hrm.Status.HostRef)
+			}
+		}
 		hrm.Status.Ready = true
 		hrm.Status.Initialization = &infrav1.InfrastructureMachineInitialization{Provisioned: true}
 		conditions.MarkTrue(hrm, infrav1.ReadyCondition)
 		// Ensure HRH state is also marked Provisioned (idempotent)
 		if hrm.Status.HostRef != "" {
-			if err := r.updateHostState(ctx, hrm.Namespace, hrm.Status.HostRef, infrav1.HostStateProvisioned); err != nil {
-				logger.Error(err, "Failed to update HRH state to Provisioned")
+			if err := r.ensureProvisionedHostStatus(ctx, hrm); err != nil {
+				logger.Error(err, "Failed to update HRH provisioned status")
 			}
+		}
+		if hrm.Status.HostRef == "" {
+			return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
 		}
 		return ctrl.Result{}, nil
 	}

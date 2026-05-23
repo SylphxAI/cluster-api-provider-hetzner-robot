@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -132,6 +134,161 @@ func (r *HetznerRobotMachineReconciler) resolveHost(
 	hrm.Status.HostRef = candidateName
 	logger.Info("Claimed HetznerRobotHost", "host", candidateName, "serverID", hrh.Spec.ServerID)
 	return hrh, nil
+}
+
+// backfillProvisionedHostClaim records host ownership for adopted Machines that
+// were already provisioned before CAPHR owned their HetznerRobotHost status. It
+// is intentionally stricter than normal selector claiming: adoption must prove
+// that the HRM providerID points at the same physical Robot server as the Host.
+func (r *HetznerRobotMachineReconciler) backfillProvisionedHostClaim(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+) (bool, error) {
+	if hrm.Status.HostRef != "" {
+		return false, nil
+	}
+
+	expectedServerID, hasProviderID := robotServerIDFromProviderID(hrm.Spec.ProviderID)
+	if !hasProviderID {
+		return false, fmt.Errorf("providerID is required to backfill provisioned host ownership")
+	}
+
+	host, err := r.resolveProvisionedAdoptionHost(ctx, hrm, expectedServerID)
+	if err != nil {
+		return false, err
+	}
+	if host.Spec.MaintenanceMode {
+		return false, fmt.Errorf("host %s is in maintenanceMode and cannot be adopted", host.Name)
+	}
+	if host.Spec.ServerID != expectedServerID {
+		return false, fmt.Errorf(
+			"host %s serverID=%d does not match HRM providerID serverID=%d",
+			host.Name,
+			host.Spec.ServerID,
+			expectedServerID,
+		)
+	}
+
+	ref := currentHostConsumerRef(host)
+	if ref != nil && !machineReferenceMatches(ref, hrm) {
+		return false, fmt.Errorf("host %s is claimed by %s/%s", host.Name, ref.Namespace, ref.Name)
+	}
+	if host.Status.State == infrav1.HostStateClaimed && ref == nil {
+		return false, fmt.Errorf("host %s is Claimed without consumerRef", host.Name)
+	}
+
+	hrhPatchHelper, err := patch.NewHelper(host, r.Client)
+	if err != nil {
+		return false, fmt.Errorf("init HRH patch helper for provisioned adoption: %w", err)
+	}
+	host.Status.State = infrav1.HostStateProvisioned
+	setHostConsumerRef(host, machineReferenceFor(hrm))
+	host.Status.DirtyReason = ""
+	host.Status.ErrorMessage = ""
+	if err := hrhPatchHelper.Patch(ctx, host); err != nil {
+		return false, fmt.Errorf("backfill host %s provisioned ownership: %w", host.Name, err)
+	}
+
+	hrm.Status.HostRef = host.Name
+	return true, nil
+}
+
+func (r *HetznerRobotMachineReconciler) ensureProvisionedHostStatus(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+) error {
+	if hrm.Status.HostRef == "" {
+		return nil
+	}
+
+	host := &infrav1.HetznerRobotHost{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, host); err != nil {
+		return fmt.Errorf("get provisioned host %s: %w", hrm.Status.HostRef, err)
+	}
+
+	ref := currentHostConsumerRef(host)
+	if ref != nil && !machineReferenceMatches(ref, hrm) {
+		return fmt.Errorf("host %s is claimed by %s/%s, not %s/%s", host.Name, ref.Namespace, ref.Name, hrm.Namespace, hrm.Name)
+	}
+	if host.Status.State == infrav1.HostStateProvisioned &&
+		machineReferenceMatches(host.Status.ConsumerRef, hrm) &&
+		machineReferenceMatches(host.Status.MachineRef, hrm) {
+		return nil
+	}
+
+	hrhPatchHelper, err := patch.NewHelper(host, r.Client)
+	if err != nil {
+		return fmt.Errorf("init HRH patch helper for provisioned status: %w", err)
+	}
+	host.Status.State = infrav1.HostStateProvisioned
+	setHostConsumerRef(host, machineReferenceFor(hrm))
+	host.Status.ErrorMessage = ""
+	if err := hrhPatchHelper.Patch(ctx, host); err != nil {
+		return fmt.Errorf("patch host %s provisioned status: %w", host.Name, err)
+	}
+	return nil
+}
+
+func (r *HetznerRobotMachineReconciler) resolveProvisionedAdoptionHost(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+	expectedServerID int,
+) (*infrav1.HetznerRobotHost, error) {
+	if hrm.Spec.HostRef != nil && hrm.Spec.HostRef.Name != "" {
+		host := &infrav1.HetznerRobotHost{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Spec.HostRef.Name}, host); err != nil {
+			return nil, fmt.Errorf("get hostRef %s for provisioned adoption: %w", hrm.Spec.HostRef.Name, err)
+		}
+		return host, nil
+	}
+
+	if hrm.Spec.HostSelector == nil {
+		return nil, fmt.Errorf("spec.hostRef or spec.hostSelector is required to backfill provisioned host ownership")
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(hrm.Spec.HostSelector)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hostSelector for provisioned adoption: %w", err)
+	}
+	list := &infrav1.HetznerRobotHostList{}
+	if err := r.List(ctx, list, client.InNamespace(hrm.Namespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return nil, fmt.Errorf("list hosts by selector for provisioned adoption: %w", err)
+	}
+
+	var matches []infrav1.HetznerRobotHost
+	for _, host := range list.Items {
+		if host.Spec.ServerID == expectedServerID {
+			matches = append(matches, host)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no HetznerRobotHost matches providerID serverID=%d", expectedServerID)
+	}
+	if len(matches) > 1 {
+		names := make([]string, 0, len(matches))
+		for _, host := range matches {
+			names = append(names, host.Name)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("multiple HetznerRobotHosts match providerID serverID=%d: %s", expectedServerID, strings.Join(names, ", "))
+	}
+	return &matches[0], nil
+}
+
+func robotServerIDFromProviderID(providerID *string) (int, bool) {
+	if providerID == nil {
+		return 0, false
+	}
+	raw := *providerID
+	const prefix = "hetzner-robot://"
+	if !strings.HasPrefix(raw, prefix) {
+		return 0, false
+	}
+	serverID, err := strconv.Atoi(strings.TrimPrefix(raw, prefix))
+	if err != nil || serverID <= 0 {
+		return 0, false
+	}
+	return serverID, true
 }
 
 // resolveHostForDelete finds the physical host for deletion without claiming
