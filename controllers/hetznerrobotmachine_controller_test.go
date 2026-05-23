@@ -732,6 +732,238 @@ func TestResolveHostSetsConsumerRefOnClaim(t *testing.T) {
 	}
 }
 
+func TestBackfillProvisionedHostClaimFromDirectHostRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2966393"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-cp1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+			HostRef:    &corev1.LocalObjectReference{Name: "cp-1"},
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			ProvisioningState: infrav1.StateProvisioned,
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 2966393,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	backfilled, err := reconciler.backfillProvisionedHostClaim(ctx, hrm)
+	if err != nil {
+		t.Fatalf("backfillProvisionedHostClaim returned error: %v", err)
+	}
+	if !backfilled {
+		t.Fatal("backfillProvisionedHostClaim returned backfilled=false")
+	}
+	if hrm.Status.HostRef != "cp-1" {
+		t.Fatalf("HostRef = %q; want cp-1", hrm.Status.HostRef)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "cp-1"), after); err != nil {
+		t.Fatalf("get host after backfill: %v", err)
+	}
+	if after.Status.State != infrav1.HostStateProvisioned {
+		t.Fatalf("host state = %q; want Provisioned", after.Status.State)
+	}
+	if after.Status.ConsumerRef == nil || after.Status.ConsumerRef.Name != "adopt-cp1" {
+		t.Fatalf("ConsumerRef = %#v; want adopt-cp1", after.Status.ConsumerRef)
+	}
+	if after.Status.MachineRef == nil || after.Status.MachineRef.Name != "adopt-cp1" {
+		t.Fatalf("MachineRef = %#v; want adopt-cp1", after.Status.MachineRef)
+	}
+}
+
+func TestBackfillProvisionedHostClaimFindsSelectorHostByProviderID(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2966418"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-cp2",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+			HostSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "control-plane"},
+			},
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			ProvisioningState: infrav1.StateProvisioned,
+		},
+	}
+	wrongHost := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-1",
+			Namespace: "caphr",
+			Labels:    map[string]string{"role": "control-plane"},
+		},
+		Spec: infrav1.HetznerRobotHostSpec{ServerID: 2966393},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	matchingHost := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-2",
+			Namespace: "caphr",
+			Labels:    map[string]string{"role": "control-plane"},
+		},
+		Spec: infrav1.HetznerRobotHostSpec{ServerID: 2966418},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, wrongHost, matchingHost).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	backfilled, err := reconciler.backfillProvisionedHostClaim(ctx, hrm)
+	if err != nil {
+		t.Fatalf("backfillProvisionedHostClaim returned error: %v", err)
+	}
+	if !backfilled {
+		t.Fatal("backfillProvisionedHostClaim returned backfilled=false")
+	}
+	if hrm.Status.HostRef != "cp-2" {
+		t.Fatalf("HostRef = %q; want cp-2", hrm.Status.HostRef)
+	}
+}
+
+func TestBackfillProvisionedHostClaimRejectsProviderIDMismatch(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2966393"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-cp1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+			HostRef:    &corev1.LocalObjectReference{Name: "cp-2"},
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-2",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 2966418,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	backfilled, err := reconciler.backfillProvisionedHostClaim(ctx, hrm)
+	if err == nil {
+		t.Fatalf("backfillProvisionedHostClaim returned nil error; backfilled=%v", backfilled)
+	}
+	if !strings.Contains(err.Error(), "does not match HRM providerID") {
+		t.Fatalf("error = %v; want providerID mismatch", err)
+	}
+	if hrm.Status.HostRef != "" {
+		t.Fatalf("HostRef = %q; want empty", hrm.Status.HostRef)
+	}
+}
+
+func TestBackfillProvisionedHostClaimDoesNotStealClaimedHost(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	providerID := "hetzner-robot://2966393"
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "adopt-cp1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			ProviderID: &providerID,
+			HostRef:    &corev1.LocalObjectReference{Name: "cp-1"},
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cp-1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 2966393,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+			ConsumerRef: &infrav1.MachineReference{
+				Name:      "other-machine",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	backfilled, err := reconciler.backfillProvisionedHostClaim(ctx, hrm)
+	if err == nil {
+		t.Fatalf("backfillProvisionedHostClaim returned nil error; backfilled=%v", backfilled)
+	}
+	if !strings.Contains(err.Error(), "claimed by caphr/other-machine") {
+		t.Fatalf("error = %v; want claimed-by-other message", err)
+	}
+	if hrm.Status.HostRef != "" {
+		t.Fatalf("HostRef = %q; want empty", hrm.Status.HostRef)
+	}
+}
+
 func TestReleaseHostTracksLastConsumerRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

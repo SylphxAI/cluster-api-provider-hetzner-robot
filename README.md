@@ -236,6 +236,12 @@ an explicit lifecycle class and compatible policy:
 `status.consumerRef` is the canonical Host ownership field. `status.machineRef`
 is kept only as a legacy compatibility alias.
 
+For adopted Machines that predate Host ownership, CAPHR may backfill
+`status.hostRef` and Host `consumerRef` without rescue, reset, or reinstall, but
+only when the Machine `providerID` (`hetzner-robot://<serverID>`) exactly
+matches the selected Host `spec.serverID`. Selector-only adoption never claims a
+different physical server.
+
 ### HetznerRobotMachine
 
 Per-machine provisioning config. Created by CAPI from TalosControlPlane or MachineDeployment.
