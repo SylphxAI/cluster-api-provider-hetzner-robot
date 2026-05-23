@@ -964,6 +964,65 @@ func TestBackfillProvisionedHostClaimDoesNotStealClaimedHost(t *testing.T) {
 	}
 }
 
+func TestEnsureProvisionedHostStatusBackfillsConsumerRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker",
+			Namespace: "caphr",
+		},
+		Status: infrav1.HetznerRobotMachineStatus{
+			HostRef:           "worker-host",
+			ProvisioningState: infrav1.StateProvisioned,
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-host",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+			MachineRef: &infrav1.MachineReference{
+				Name:      "worker",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	if err := reconciler.ensureProvisionedHostStatus(ctx, hrm); err != nil {
+		t.Fatalf("ensureProvisionedHostStatus returned error: %v", err)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "worker-host"), after); err != nil {
+		t.Fatalf("get host after ensure: %v", err)
+	}
+	if after.Status.State != infrav1.HostStateProvisioned {
+		t.Fatalf("state = %q; want Provisioned", after.Status.State)
+	}
+	if after.Status.ConsumerRef == nil || after.Status.ConsumerRef.Name != "worker" {
+		t.Fatalf("ConsumerRef = %#v; want worker", after.Status.ConsumerRef)
+	}
+	if after.Status.MachineRef == nil || after.Status.MachineRef.Name != "worker" {
+		t.Fatalf("MachineRef = %#v; want worker", after.Status.MachineRef)
+	}
+}
+
 func TestReleaseHostTracksLastConsumerRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

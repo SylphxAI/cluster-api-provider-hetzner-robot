@@ -281,8 +281,8 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		conditions.MarkTrue(hrm, infrav1.ReadyCondition)
 		// Ensure HRH state is also marked Provisioned (idempotent)
 		if hrm.Status.HostRef != "" {
-			if err := r.updateHostState(ctx, hrm.Namespace, hrm.Status.HostRef, infrav1.HostStateProvisioned); err != nil {
-				logger.Error(err, "Failed to update HRH state to Provisioned")
+			if err := r.ensureProvisionedHostStatus(ctx, hrm); err != nil {
+				logger.Error(err, "Failed to update HRH provisioned status")
 			}
 		}
 		if hrm.Status.HostRef == "" {

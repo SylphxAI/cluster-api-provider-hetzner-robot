@@ -193,6 +193,42 @@ func (r *HetznerRobotMachineReconciler) backfillProvisionedHostClaim(
 	return true, nil
 }
 
+func (r *HetznerRobotMachineReconciler) ensureProvisionedHostStatus(
+	ctx context.Context,
+	hrm *infrav1.HetznerRobotMachine,
+) error {
+	if hrm.Status.HostRef == "" {
+		return nil
+	}
+
+	host := &infrav1.HetznerRobotHost{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: hrm.Namespace, Name: hrm.Status.HostRef}, host); err != nil {
+		return fmt.Errorf("get provisioned host %s: %w", hrm.Status.HostRef, err)
+	}
+
+	ref := currentHostConsumerRef(host)
+	if ref != nil && !machineReferenceMatches(ref, hrm) {
+		return fmt.Errorf("host %s is claimed by %s/%s, not %s/%s", host.Name, ref.Namespace, ref.Name, hrm.Namespace, hrm.Name)
+	}
+	if host.Status.State == infrav1.HostStateProvisioned &&
+		machineReferenceMatches(host.Status.ConsumerRef, hrm) &&
+		machineReferenceMatches(host.Status.MachineRef, hrm) {
+		return nil
+	}
+
+	hrhPatchHelper, err := patch.NewHelper(host, r.Client)
+	if err != nil {
+		return fmt.Errorf("init HRH patch helper for provisioned status: %w", err)
+	}
+	host.Status.State = infrav1.HostStateProvisioned
+	setHostConsumerRef(host, machineReferenceFor(hrm))
+	host.Status.ErrorMessage = ""
+	if err := hrhPatchHelper.Patch(ctx, host); err != nil {
+		return fmt.Errorf("patch host %s provisioned status: %w", host.Name, err)
+	}
+	return nil
+}
+
 func (r *HetznerRobotMachineReconciler) resolveProvisionedAdoptionHost(
 	ctx context.Context,
 	hrm *infrav1.HetznerRobotMachine,
