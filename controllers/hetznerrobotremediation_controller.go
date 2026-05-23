@@ -85,24 +85,24 @@ func (r *HetznerRobotRemediationReconciler) Reconcile(ctx context.Context, req c
 	// Resolve the full object chain to get serverID and robot credentials:
 	// Machine → InfrastructureRef → HetznerRobotMachine → HostRef → HetznerRobotHost → ServerID
 	// Machine → Cluster → InfrastructureRef → HetznerRobotCluster → RobotSecretRef
-	serverID, hrc, err := r.resolveServerAndCluster(ctx, machine)
+	serverID, host, hrc, err := r.resolveServerAndCluster(ctx, machine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve server and cluster: %w", err)
 	}
 
-	logger = logger.WithValues("serverID", serverID)
+	logger = logger.WithValues("serverID", serverID, "host", host.Name)
 	// Inject enriched logger into context so phase methods get full structured context.
 	ctx = log.IntoContext(ctx, logger)
 
 	switch remediation.Status.Phase {
 	case "": // Initial — no phase set yet
-		return r.reconcileInitial(ctx, remediation, serverID, hrc)
+		return r.reconcileInitial(ctx, remediation, serverID, host, hrc)
 
 	case infrav1.RemediationPhaseRunning:
 		return r.reconcileRunning(ctx, remediation)
 
 	case infrav1.RemediationPhaseWaiting:
-		return r.reconcileWaiting(ctx, remediation, serverID, hrc)
+		return r.reconcileWaiting(ctx, remediation, serverID, host, hrc)
 
 	default:
 		logger.Info("Unknown remediation phase, ignoring", "phase", remediation.Status.Phase)
@@ -115,9 +115,15 @@ func (r *HetznerRobotRemediationReconciler) reconcileInitial(
 	ctx context.Context,
 	remediation *infrav1.HetznerRobotRemediation,
 	serverID int,
+	host *infrav1.HetznerRobotHost,
 	hrc *infrav1.HetznerRobotCluster,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	if err := authorizeAutomatedHardwareReset(host); err != nil {
+		logger.Info("Host policy blocks remediation hardware reset", "error", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
 
 	robotClient, err := r.buildRobotClient(ctx, hrc)
 	if err != nil {
@@ -170,6 +176,7 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 	ctx context.Context,
 	remediation *infrav1.HetznerRobotRemediation,
 	serverID int,
+	host *infrav1.HetznerRobotHost,
 	hrc *infrav1.HetznerRobotCluster,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -188,6 +195,11 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 	}
 
 	// Retries remain — issue another hardware reset
+	if err := authorizeAutomatedHardwareReset(host); err != nil {
+		logger.Info("Host policy blocks remediation retry hardware reset", "error", err.Error())
+		return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+	}
+
 	robotClient, err := r.buildRobotClient(ctx, hrc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
@@ -216,7 +228,8 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 	return ctrl.Result{RequeueAfter: timeout}, nil
 }
 
-// resolveServerAndCluster traverses the 4-hop object chain from Machine to ServerID and HetznerRobotCluster:
+// resolveServerAndCluster traverses the object chain from Machine to ServerID,
+// HetznerRobotHost, and HetznerRobotCluster:
 //
 //	Machine → Spec.InfrastructureRef → HetznerRobotMachine
 //	HetznerRobotMachine → Status.HostRef → HetznerRobotHost → Spec.ServerID
@@ -224,10 +237,10 @@ func (r *HetznerRobotRemediationReconciler) reconcileWaiting(
 func (r *HetznerRobotRemediationReconciler) resolveServerAndCluster(
 	ctx context.Context,
 	machine *clusterv1.Machine,
-) (int, *infrav1.HetznerRobotCluster, error) {
+) (int, *infrav1.HetznerRobotHost, *infrav1.HetznerRobotCluster, error) {
 	// Step 1: Machine → HetznerRobotMachine via InfrastructureRef
 	if machine.Spec.InfrastructureRef.Name == "" {
-		return 0, nil, fmt.Errorf("Machine %s/%s has no InfrastructureRef", machine.Namespace, machine.Name)
+		return 0, nil, nil, fmt.Errorf("Machine %s/%s has no InfrastructureRef", machine.Namespace, machine.Name)
 	}
 	hrm := &infrav1.HetznerRobotMachine{}
 	hrmKey := types.NamespacedName{
@@ -236,14 +249,17 @@ func (r *HetznerRobotRemediationReconciler) resolveServerAndCluster(
 	}
 	if err := r.Get(ctx, hrmKey, hrm); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, nil, fmt.Errorf("HetznerRobotMachine %s not found: %w", hrmKey, err)
+			return 0, nil, nil, fmt.Errorf("HetznerRobotMachine %s not found: %w", hrmKey, err)
 		}
-		return 0, nil, fmt.Errorf("get HetznerRobotMachine %s: %w", hrmKey, err)
+		return 0, nil, nil, fmt.Errorf("get HetznerRobotMachine %s: %w", hrmKey, err)
 	}
 
 	// Step 2: HetznerRobotMachine → HetznerRobotHost via Status.HostRef
 	if hrm.Status.HostRef == "" {
-		return 0, nil, fmt.Errorf("HetznerRobotMachine %s has no HostRef — machine may not be provisioned yet", hrmKey)
+		return 0, nil, nil, fmt.Errorf(
+			"HetznerRobotMachine %s has no HostRef — machine may not be provisioned yet",
+			hrmKey,
+		)
 	}
 	host := &infrav1.HetznerRobotHost{}
 	hostKey := types.NamespacedName{
@@ -252,21 +268,21 @@ func (r *HetznerRobotRemediationReconciler) resolveServerAndCluster(
 	}
 	if err := r.Get(ctx, hostKey, host); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, nil, fmt.Errorf("HetznerRobotHost %s not found: %w", hostKey, err)
+			return 0, nil, nil, fmt.Errorf("HetznerRobotHost %s not found: %w", hostKey, err)
 		}
-		return 0, nil, fmt.Errorf("get HetznerRobotHost %s: %w", hostKey, err)
+		return 0, nil, nil, fmt.Errorf("get HetznerRobotHost %s: %w", hostKey, err)
 	}
 
 	// Step 3: Machine → Cluster → HetznerRobotCluster
 	cluster, err := util.GetClusterFromMetadata(ctx, r.Client, machine.ObjectMeta)
 	if err != nil {
-		return 0, nil, fmt.Errorf("get Cluster from Machine metadata: %w", err)
+		return 0, nil, nil, fmt.Errorf("get Cluster from Machine metadata: %w", err)
 	}
 	if cluster == nil {
-		return 0, nil, fmt.Errorf("Cluster not found for Machine %s/%s", machine.Namespace, machine.Name)
+		return 0, nil, nil, fmt.Errorf("Cluster not found for Machine %s/%s", machine.Namespace, machine.Name)
 	}
 	if cluster.Spec.InfrastructureRef == nil {
-		return 0, nil, fmt.Errorf("Cluster %s/%s has no InfrastructureRef", cluster.Namespace, cluster.Name)
+		return 0, nil, nil, fmt.Errorf("Cluster %s/%s has no InfrastructureRef", cluster.Namespace, cluster.Name)
 	}
 
 	hrc := &infrav1.HetznerRobotCluster{}
@@ -276,12 +292,12 @@ func (r *HetznerRobotRemediationReconciler) resolveServerAndCluster(
 	}
 	if err := r.Get(ctx, hrcKey, hrc); err != nil {
 		if apierrors.IsNotFound(err) {
-			return 0, nil, fmt.Errorf("HetznerRobotCluster %s not found: %w", hrcKey, err)
+			return 0, nil, nil, fmt.Errorf("HetznerRobotCluster %s not found: %w", hrcKey, err)
 		}
-		return 0, nil, fmt.Errorf("get HetznerRobotCluster %s: %w", hrcKey, err)
+		return 0, nil, nil, fmt.Errorf("get HetznerRobotCluster %s: %w", hrcKey, err)
 	}
 
-	return host.Spec.ServerID, hrc, nil
+	return host.Spec.ServerID, host, hrc, nil
 }
 
 // buildRobotClient creates a Robot API client from the HetznerRobotCluster's secret reference.

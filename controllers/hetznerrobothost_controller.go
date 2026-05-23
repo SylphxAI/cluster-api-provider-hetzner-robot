@@ -24,7 +24,7 @@ import (
 //
 // The reconciler's job is minimal:
 //   - Add a finalizer to prevent accidental deletion while claimed
-//   - On delete: block until no Machine has claimed this host (MachineRef == nil)
+//   - On delete: block until no Machine has claimed this host (ConsumerRef == nil)
 //   - Initialise Status.State = Available for newly created hosts
 type HetznerRobotHostReconciler struct {
 	client.Client
@@ -101,9 +101,14 @@ func (r *HetznerRobotHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Handle deletion
 	if !host.DeletionTimestamp.IsZero() {
 		// Block deletion if a Machine currently claims this host
-		if host.Status.MachineRef != nil {
+		if host.Status.ConsumerRef != nil || host.Status.MachineRef != nil {
+			ref := currentHostConsumerRef(host)
+			refName := ""
+			if ref != nil {
+				refName = ref.Name
+			}
 			logger.Info("Host is still claimed, blocking deletion",
-				"machineRef", host.Status.MachineRef.Name)
+				"consumerRef", refName)
 			// Requeue — the HRM controller will release the host when the Machine is deleted
 			return ctrl.Result{RequeueAfter: requeueAfterShort}, nil
 		}

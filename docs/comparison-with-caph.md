@@ -51,7 +51,7 @@ SSH is used **only in rescue** to write the disk image. After reboot, all intera
 | **Error handling** | Uniform retry | Transient vs permanent distinction + exponential backoff |
 | **Status storage** | In Spec (CAPI `clusterctl move` workaround) | In Status (K8s convention) |
 | **Host claiming** | Label-based pool | `hostRef` (static) or `hostSelector` (pool) |
-| **Remediation** | Reboot via SSH | Hardware reset via Robot API |
+| **Remediation** | Reboot via SSH | Policy-gated hardware reset via Robot API |
 | **IPv6** | Not supported on bare metal | Dual-stack: IPv4 VLAN + IPv6 public |
 | **Storage nodes** | Not addressed | `ephemeralSize` → VolumeConfig + OSD partition |
 | **Codebase** | ~15k LOC (bare metal portion) | ~3.4k LOC total |

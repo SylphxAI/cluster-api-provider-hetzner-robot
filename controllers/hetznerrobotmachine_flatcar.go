@@ -91,6 +91,9 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 	}
 	hrm.Status.PrimaryMAC = hw.PrimaryMAC
 	hrm.Status.GatewayIP = hw.GatewayIP
+	if err := r.recordHostHardwareDetails(ctx, hrm.Namespace, hrm.Status.HostRef, hw); err != nil {
+		logger.Error(err, "Failed to record host hardware details", "host", hrm.Status.HostRef)
+	}
 	logger.Info("Hardware detected",
 		"mac", hw.PrimaryMAC, "gateway", hw.GatewayIP,
 		"disks", hw.NVMeDisks, "cephDisks", len(hw.CephDisks),
@@ -117,7 +120,8 @@ func (r *HetznerRobotMachineReconciler) stateInstallFlatcar(
 	}
 	hrm.Status.ResolvedInstallDisk = stableDisk
 
-	// Wipe all NVMe disks (same as Talos — clean slate).
+	// Wipe all NVMe disks only after reconcileNormal has authorized this host's
+	// destructive provisioning policy.
 	if len(hw.NVMeDisks) == 0 {
 		return ctrl.Result{}, fmt.Errorf("no NVMe disks found on %s", serverIP)
 	}
@@ -312,9 +316,9 @@ func (r *HetznerRobotMachineReconciler) stateWaitFlatcarBoot(
 // IgnitionConfig is a minimal representation of Ignition 3.x for JSON manipulation.
 // Only the fields we need to inject into are modeled.
 type IgnitionConfig struct {
-	Ignition IgnitionMeta      `json:"ignition"`
-	Storage  *IgnitionStorage  `json:"storage,omitempty"`
-	Systemd  *IgnitionSystemd  `json:"systemd,omitempty"`
+	Ignition IgnitionMeta     `json:"ignition"`
+	Storage  *IgnitionStorage `json:"storage,omitempty"`
+	Systemd  *IgnitionSystemd `json:"systemd,omitempty"`
 	// Passwd and other fields pass through via rawFields.
 	rawFields map[string]json.RawMessage
 }
@@ -324,13 +328,13 @@ type IgnitionMeta struct {
 }
 
 type IgnitionStorage struct {
-	Files       []IgnitionFile      `json:"files,omitempty"`
-	Directories []json.RawMessage   `json:"directories,omitempty"`
-	Links       []json.RawMessage   `json:"links,omitempty"`
-	Filesystems []json.RawMessage   `json:"filesystems,omitempty"`
-	Luks        []json.RawMessage   `json:"luks,omitempty"`
-	Raid        []json.RawMessage   `json:"raid,omitempty"`
-	Disks       []json.RawMessage   `json:"disks,omitempty"`
+	Files       []IgnitionFile    `json:"files,omitempty"`
+	Directories []json.RawMessage `json:"directories,omitempty"`
+	Links       []json.RawMessage `json:"links,omitempty"`
+	Filesystems []json.RawMessage `json:"filesystems,omitempty"`
+	Luks        []json.RawMessage `json:"luks,omitempty"`
+	Raid        []json.RawMessage `json:"raid,omitempty"`
+	Disks       []json.RawMessage `json:"disks,omitempty"`
 }
 
 type IgnitionFile struct {
@@ -365,11 +369,11 @@ type IgnitionSystemd struct {
 }
 
 type IgnitionUnit struct {
-	Name     string              `json:"name"`
-	Enabled  *bool               `json:"enabled,omitempty"`
-	Mask     *bool               `json:"mask,omitempty"`
-	Contents *string             `json:"contents,omitempty"`
-	Dropins  []IgnitionDropin    `json:"dropins,omitempty"`
+	Name     string           `json:"name"`
+	Enabled  *bool            `json:"enabled,omitempty"`
+	Mask     *bool            `json:"mask,omitempty"`
+	Contents *string          `json:"contents,omitempty"`
+	Dropins  []IgnitionDropin `json:"dropins,omitempty"`
 }
 
 type IgnitionDropin struct {

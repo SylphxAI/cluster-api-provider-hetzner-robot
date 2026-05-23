@@ -286,11 +286,6 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 		return ctrl.Result{}, fmt.Errorf("resolve host: %w", err)
 	}
 
-	robotClient, err := r.buildRobotClient(ctx, hrc)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
-	}
-
 	serverID := hrh.Spec.ServerID
 	serverIP := hrh.Spec.ServerIP
 	logger.Info("Reconciling machine", "serverID", serverID, "ip", serverIP, "state", hrm.Status.ProvisioningState)
@@ -314,15 +309,30 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 			clusterv1.MachineAddress{Type: clusterv1.MachineExternalIP, Address: ipv6Addr})
 	}
 
+	if provisioningMayBecomeDestructive(hrm.Status.ProvisioningState) {
+		if err := authorizeDestructiveProvisioning(hrh); err != nil {
+			markDestructiveProvisioningDenied(hrm, err)
+			logger.Info("Destructive provisioning is blocked by host policy",
+				"host", hrh.Name,
+				"lifecycleClass", hrh.Spec.LifecycleClass,
+				"policy", hrh.Spec.DestructiveProvisioningPolicy,
+				"error", err.Error())
+			return ctrl.Result{RequeueAfter: requeueAfterLong}, nil
+		}
+	}
+
+	robotClient, err := r.buildRobotClient(ctx, hrc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("build robot client: %w", err)
+	}
+
 	// Run state machine — OS-aware routing.
 	// Common states (rescue) are shared between Talos and Flatcar.
 	// Install/boot/config states branch based on hrm.Spec.OSType.
 	switch hrm.Status.ProvisioningState {
 	case infrav1.StateNone:
-		// Clean slate: always go through the full rescue → wipe → install cycle.
-		// No shortcuts — same contract as cloud VMs. Every provision starts fresh,
-		// regardless of what's currently on disk (stale Talos, old OS, maintenance mode).
-		// This eliminates stale state issues (hostname conflicts, partial configs, etc.).
+		// Clean slate for explicitly authorized hosts: go through the full
+		// rescue → wipe → install cycle only after host lifecycle policy permits it.
 		return r.stateActivateRescue(ctx, hrm, hrc, robotClient, serverID, serverIP)
 	case infrav1.StateActivatingRescue:
 		return r.stateCheckRescueActive(ctx, hrm, hrc, robotClient, serverID, serverIP)
@@ -425,6 +435,16 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	// Activate rescue + hardware reset to wipe the node.
 	// Skip if serverID could not be resolved (best-effort deletion).
 	if serverID != 0 {
+		if shouldReleaseHost && hrh != nil {
+			if err := authorizeDestructiveProvisioning(hrh); err != nil {
+				logger.Info("Host policy blocks delete reset and release; leaving host claimed for manual/platform repair",
+					"host", hrh.Name,
+					"serverID", serverID,
+					"error", err.Error())
+				controllerutil.RemoveFinalizer(hrm, infrav1.MachineFinalizer)
+				return ctrl.Result{}, nil
+			}
+		}
 		sshFingerprint, _ := r.getSSHKeyFingerprint(ctx, hrc)
 		if _, err := robotClient.ActivateRescue(ctx, serverID, sshFingerprint); err != nil {
 			logger.Error(err, "Failed to activate rescue on delete, resetting anyway")

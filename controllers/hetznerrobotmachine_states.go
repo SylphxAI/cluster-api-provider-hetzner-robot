@@ -135,9 +135,8 @@ func (r *HetznerRobotMachineReconciler) stateCheckRescueActive(
 
 	if !rescueStatus.Active {
 		// Rescue inactive. Server may have booted something else (Talos, old OS) or
-		// is still mid-boot after a recent hw reset. No shortcuts — we always need
-		// rescue for a clean provision (wipe all + fresh install).
-		// In both cases, re-activate rescue and wipe.
+		// is still mid-boot after a recent hw reset. If we proceed, the host has
+		// already passed the lifecycle policy gate in reconcileNormal.
 		if talos.IsUp(ctx, serverIP) {
 			// Talos booted instead of rescue — wipe system disk to clear stale EFI entries.
 			logger.Info("Talos detected during early provisioning — wiping system disk",
@@ -238,6 +237,9 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	hrm.Status.PrimaryMAC = hw.PrimaryMAC
 	hrm.Status.GatewayIP = hw.GatewayIP
+	if err := r.recordHostHardwareDetails(ctx, hrm.Namespace, hrm.Status.HostRef, hw); err != nil {
+		logger.Error(err, "Failed to record host hardware details", "host", hrm.Status.HostRef)
+	}
 	logger.Info("Hardware detected",
 		"mac", hw.PrimaryMAC, "gateway", hw.GatewayIP,
 		"disks", hw.NVMeDisks, "cephDisks", len(hw.CephDisks),
@@ -266,9 +268,9 @@ func (r *HetznerRobotMachineReconciler) stateInstallTalos(
 	}
 	hrm.Status.ResolvedInstallDisk = stableDisk
 
-	// Always wipe ALL NVMe disks for a clean slate — same contract as cloud providers.
-	// Prevents boot loops from old Talos installs on other disks.
-	// Ceph data recovery is Rook's responsibility (3x replica), not the infra provider's.
+	// Wipe all NVMe disks only after reconcileNormal has authorized this host's
+	// destructive provisioning policy. This preserves the clean-slate compute
+	// contract without treating storage or adopted control-plane hosts as disposable.
 	if len(hw.NVMeDisks) == 0 {
 		return ctrl.Result{}, fmt.Errorf("no NVMe disks found on %s", serverIP)
 	}
@@ -604,4 +606,3 @@ func (r *HetznerRobotMachineReconciler) stateWaitForBoot(
 	}
 	return ctrl.Result{}, nil
 }
-

@@ -210,8 +210,8 @@ func ResolveInstallDiskFromInfo(hw *HardwareInfo, configuredDisk string) (string
 			return configuredDisk, nil // no NVMe disks found — fall back to configured
 		}
 		// If the template explicitly specifies an install disk, trust it.
-		// CAPHR's design is immutable infrastructure: wipe all + fresh install.
-		// The Ceph data on these disks will be wiped anyway (WipeAllDisks).
+		// Host lifecycle policy is checked by the controller before any wipe.
+		// Storage hosts without an external release never reach WipeAllDisks.
 		if configuredDisk != "" {
 			return configuredDisk, nil
 		}
@@ -531,4 +531,3 @@ func isReachableAddr(addr string, timeout time.Duration) bool {
 	conn.Close()
 	return true
 }
-

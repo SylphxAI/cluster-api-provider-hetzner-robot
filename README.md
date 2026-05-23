@@ -214,11 +214,27 @@ spec:
   serverIP: ""           # Auto-detected from Robot API if empty
   serverIPv6Net: ""      # Auto-detected from Robot API if empty
   internalIP: 10.10.0.6  # VLAN IP (static assignment)
+  lifecycleClass: compute
+  destructiveProvisioningPolicy: AlwaysCleanSlate
+  maintenanceMode: false
 status:
-  state: Available       # Available → Claimed → Provisioned → Deprovisioning
+  state: Available       # Available → Claimed → Provisioned
+  consumerRef: null      # Set by controller while a HetznerRobotMachine owns it
 ```
 
-States: `Available` (in pool) → `Claimed` (assigned to a Machine) → `Provisioned` (running) → `Deprovisioning` (machine deleted, awaiting cleanup) → `Available`
+States: `Available` (in pool) → `Claimed` (assigned to a Machine) → `Provisioned` (running) → `Available` after a policy-authorized delete/reset/release.
+
+Destructive provisioning fails closed. CAPHR wipes disks only when the Host has
+an explicit lifecycle class and compatible policy:
+
+| Lifecycle class | Policy | Result |
+| --- | --- | --- |
+| `compute` | `AlwaysCleanSlate` | CAPHR may wipe and reinstall. |
+| `control-plane` | `NeverDestructiveByDefault` | Generic wipe/reset is denied. |
+| `storage` | `RequiresExternalRelease` | Generic wipe/reset is denied until a storage lifecycle release controller exists. |
+
+`status.consumerRef` is the canonical Host ownership field. `status.machineRef`
+is kept only as a legacy compatibility alias.
 
 ### HetznerRobotMachine
 
@@ -242,7 +258,11 @@ Template for MachineDeployment (worker scaling).
 
 ### HetznerRobotRemediation / HetznerRobotRemediationTemplate
 
-MachineHealthCheck integration. When a node is unhealthy, CAPHR issues a hardware reset via Robot API and waits for recovery.
+MachineHealthCheck integration. When a node is unhealthy, CAPHR may issue a
+hardware reset via Robot API and wait for recovery, but only if the claimed Host
+lifecycle policy permits automated resets. Compute Hosts with
+`AlwaysCleanSlate` are resettable; control-plane and storage Hosts require a
+higher-level quorum or storage-health gate.
 
 ```yaml
 spec:
@@ -304,7 +324,11 @@ After Talos installation, PXE might still be first in the EFI boot order, causin
 
 Storage servers may have existing Ceph BlueStore signatures on disks. Installing Talos on a Ceph OSD disk would destroy data.
 
-**Fix**: `lsblk` + `blkid` check for `ceph_bluestore` signature. Refuse to install on disks with active Ceph data. `ephemeralSize` spec creates a separate OSD-ready partition via Talos VolumeConfig.
+**Fix**: Host lifecycle policy is checked before rescue reset or full-disk wipe.
+Only `compute` Hosts with `AlwaysCleanSlate` are treated as disposable. Storage
+Hosts require an external release before any destructive path is allowed.
+`ephemeralSize` spec creates a separate OSD-ready partition via Talos
+VolumeConfig after policy has authorized provisioning.
 
 ## Comparison with Alternatives
 

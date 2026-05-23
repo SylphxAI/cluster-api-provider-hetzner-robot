@@ -9,8 +9,6 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 )
 
-
-
 func (in *HetznerRobotCluster) DeepCopyInto(out *HetznerRobotCluster) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
@@ -394,8 +392,23 @@ func (in *HetznerRobotHostSpec) DeepCopy() *HetznerRobotHostSpec {
 
 func (in *HetznerRobotHostStatus) DeepCopyInto(out *HetznerRobotHostStatus) {
 	*out = *in
+	if in.ConsumerRef != nil {
+		in, out := &in.ConsumerRef, &out.ConsumerRef
+		*out = new(MachineReference)
+		**out = **in
+	}
 	if in.MachineRef != nil {
 		in, out := &in.MachineRef, &out.MachineRef
+		*out = new(MachineReference)
+		**out = **in
+	}
+	if in.HardwareDetails != nil {
+		in, out := &in.HardwareDetails, &out.HardwareDetails
+		*out = new(HostHardwareDetails)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.LastConsumerRef != nil {
+		in, out := &in.LastConsumerRef, &out.LastConsumerRef
 		*out = new(MachineReference)
 		**out = **in
 	}
@@ -406,6 +419,36 @@ func (in *HetznerRobotHostStatus) DeepCopy() *HetznerRobotHostStatus {
 		return nil
 	}
 	out := new(HetznerRobotHostStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HostHardwareDetails) DeepCopyInto(out *HostHardwareDetails) {
+	*out = *in
+	if in.NVMeDisks != nil {
+		in, out := &in.NVMeDisks, &out.NVMeDisks
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.CephDisks != nil {
+		in, out := &in.CephDisks, &out.CephDisks
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ByIDPaths != nil {
+		in, out := &in.ByIDPaths, &out.ByIDPaths
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+}
+
+func (in *HostHardwareDetails) DeepCopy() *HostHardwareDetails {
+	if in == nil {
+		return nil
+	}
+	out := new(HostHardwareDetails)
 	in.DeepCopyInto(out)
 	return out
 }
