@@ -31,7 +31,7 @@ jobs:
             base="${{ github.event.pull_request.base.sha }}"
           else
             base="${{ github.event.before }}"
-            if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            if [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
               base="$(git merge-base origin/main HEAD)"
             fi
           fi

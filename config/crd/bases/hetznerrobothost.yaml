@@ -30,8 +30,8 @@ spec:
     - jsonPath: .status.state
       name: State
       type: string
-    - jsonPath: .status.machineRef.name
-      name: Machine
+    - jsonPath: .status.consumerRef.name
+      name: Consumer
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -53,16 +53,33 @@ spec:
           spec:
             description: HetznerRobotHostSpec defines the desired state of a physical server.
             properties:
+              destructiveProvisioningPolicy:
+                description: DestructiveProvisioningPolicy declares whether CAPHR may wipe or reset this host. Missing or unknown values fail closed.
+                enum:
+                - AlwaysCleanSlate
+                - NeverDestructiveByDefault
+                - RequiresExternalRelease
+                type: string
+              installDisk:
+                description: InstallDisk is the disk on which Talos will be installed. Defaults to /dev/nvme0n1
+                default: "/dev/nvme0n1"
+                type: string
+              lifecycleClass:
+                description: LifecycleClass declares the physical role of this host. Missing or unknown values fail closed for destructive provisioning.
+                enum:
+                - compute
+                - control-plane
+                - storage
+                type: string
+              maintenanceMode:
+                description: MaintenanceMode prevents new claims and destructive provisioning for this host.
+                type: boolean
               serverID:
                 description: ServerID is the Hetzner Robot server ID.
                 minimum: 1
                 type: integer
               serverIP:
                 description: ServerIP is the public IP address of the server.
-                type: string
-              installDisk:
-                description: InstallDisk is the disk on which Talos will be installed. Defaults to /dev/nvme0n1
-                default: "/dev/nvme0n1"
                 type: string
             required:
             - serverID
@@ -71,11 +88,8 @@ spec:
           status:
             description: HetznerRobotHostStatus defines the observed state of a physical server.
             properties:
-              state:
-                description: State is the current lifecycle state of the host.
-                type: string
-              machineRef:
-                description: MachineRef is a reference to the HetznerRobotMachine that has claimed this host.
+              consumerRef:
+                description: ConsumerRef is a reference to the HetznerRobotMachine that has claimed this host.
                 properties:
                   name:
                     description: Name is the name of the HetznerRobotMachine.
@@ -87,8 +101,65 @@ spec:
                 - name
                 - namespace
                 type: object
+              dirtyReason:
+                description: DirtyReason explains why an Available host may still need clean-slate provisioning.
+                type: string
               errorMessage:
                 description: ErrorMessage contains a human-readable description of a terminal error.
+                type: string
+              hardwareDetails:
+                description: HardwareDetails contains controller-discovered physical facts from rescue mode.
+                properties:
+                  byIDPaths:
+                    additionalProperties:
+                      type: string
+                    description: ByIDPaths maps detected disk devices to stable /dev/disk/by-id paths.
+                    type: object
+                  cephDisks:
+                    description: CephDisks is the subset of NVMeDisks with Ceph BlueStore signatures.
+                    items:
+                      type: string
+                    type: array
+                  gatewayIP:
+                    description: GatewayIP is the detected default gateway for the public interface.
+                    type: string
+                  nvmeDisks:
+                    description: NVMeDisks is the list of whole NVMe disk devices detected in rescue.
+                    items:
+                      type: string
+                    type: array
+                  primaryMAC:
+                    description: PrimaryMAC is the MAC address of the primary NIC.
+                    type: string
+                type: object
+              lastConsumerRef:
+                description: LastConsumerRef records the last HetznerRobotMachine that owned this host.
+                properties:
+                  name:
+                    description: Name is the name of the HetznerRobotMachine.
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the HetznerRobotMachine.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              machineRef:
+                description: MachineRef is the legacy alias for ConsumerRef, kept for compatibility with existing readers.
+                properties:
+                  name:
+                    description: Name is the name of the HetznerRobotMachine.
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the HetznerRobotMachine.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              state:
+                description: State is the current lifecycle state of the host.
                 type: string
             type: object
         type: object

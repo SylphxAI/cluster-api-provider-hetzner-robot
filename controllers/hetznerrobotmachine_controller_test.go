@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -461,6 +462,333 @@ func TestResolveHostForDeleteDoesNotUseUnclaimedSpecHostRef(t *testing.T) {
 	}
 	if shouldRelease {
 		t.Fatal("resolveHostForDelete returned shouldRelease=true for an unclaimed spec.hostRef host")
+	}
+}
+
+func TestAuthorizeDestructiveProvisioning(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    infrav1.HetznerRobotHost
+		wantErr string
+	}{
+		{
+			name: "compute host with explicit clean slate policy is allowed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassCompute,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyAlwaysCleanSlate,
+				},
+			},
+		},
+		{
+			name: "missing lifecycle class fails closed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "unknown-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyAlwaysCleanSlate,
+				},
+			},
+			wantErr: "lifecycleClass is required",
+		},
+		{
+			name: "missing policy fails closed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass: infrav1.HostLifecycleClassCompute,
+				},
+			},
+			wantErr: "policy",
+		},
+		{
+			name: "maintenance mode fails closed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-3"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassCompute,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyAlwaysCleanSlate,
+					MaintenanceMode:               true,
+				},
+			},
+			wantErr: "maintenanceMode=true",
+		},
+		{
+			name: "control-plane host is denied by default",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassControlPlane,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyNeverDestructiveByDefault,
+				},
+			},
+			wantErr: "control-plane",
+		},
+		{
+			name: "storage host requires external release that is not implemented yet",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "storage-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassStorage,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyRequiresExternalRelease,
+				},
+			},
+			wantErr: "external storage release",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := authorizeDestructiveProvisioning(&tt.host)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("authorizeDestructiveProvisioning returned error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("authorizeDestructiveProvisioning error = %v; want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthorizeAutomatedHardwareReset(t *testing.T) {
+	tests := []struct {
+		name    string
+		host    infrav1.HetznerRobotHost
+		wantErr string
+	}{
+		{
+			name: "compute host with explicit clean slate policy is allowed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassCompute,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyAlwaysCleanSlate,
+				},
+			},
+		},
+		{
+			name: "control-plane host requires platform quorum gate",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassControlPlane,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyNeverDestructiveByDefault,
+				},
+			},
+			wantErr: "platform quorum gate",
+		},
+		{
+			name: "storage host requires storage health gate",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "storage-1"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassStorage,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyRequiresExternalRelease,
+				},
+			},
+			wantErr: "storage health/release gate",
+		},
+		{
+			name: "maintenance mode fails closed",
+			host: infrav1.HetznerRobotHost{
+				ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+				Spec: infrav1.HetznerRobotHostSpec{
+					LifecycleClass:                infrav1.HostLifecycleClassCompute,
+					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyAlwaysCleanSlate,
+					MaintenanceMode:               true,
+				},
+			},
+			wantErr: "maintenanceMode=true",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := authorizeAutomatedHardwareReset(&tt.host)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("authorizeAutomatedHardwareReset returned error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("authorizeAutomatedHardwareReset error = %v; want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveHostSkipsMaintenanceSelectorHost(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			HostSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "worker"},
+			},
+		},
+	}
+	maintenanceHost := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-maintenance",
+			Namespace: "caphr",
+			Labels:    map[string]string{"role": "worker"},
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID:        12345,
+			MaintenanceMode: true,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, maintenanceHost).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	host, err := reconciler.resolveHost(ctx, hrm)
+	if err == nil {
+		t.Fatalf("resolveHost returned host %v; want maintenance-mode denial", host)
+	}
+	if !strings.Contains(err.Error(), "no non-maintenance Available") {
+		t.Fatalf("resolveHost error = %v; want non-maintenance message", err)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "worker-maintenance"), after); err != nil {
+		t.Fatalf("get host after resolve: %v", err)
+	}
+	if after.Status.MachineRef != nil || after.Status.ConsumerRef != nil {
+		t.Fatalf(
+			"maintenance host was claimed: machineRef=%#v consumerRef=%#v",
+			after.Status.MachineRef,
+			after.Status.ConsumerRef,
+		)
+	}
+}
+
+func TestResolveHostSetsConsumerRefOnClaim(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotMachineSpec{
+			HostRef: &corev1.LocalObjectReference{Name: "worker-host"},
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-host",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateAvailable,
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(hrm, host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	claimed, err := reconciler.resolveHost(ctx, hrm)
+	if err != nil {
+		t.Fatalf("resolveHost returned error: %v", err)
+	}
+	if claimed.Name != "worker-host" {
+		t.Fatalf("resolveHost returned host %q; want worker-host", claimed.Name)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "worker-host"), after); err != nil {
+		t.Fatalf("get host after resolve: %v", err)
+	}
+	if after.Status.ConsumerRef == nil || after.Status.ConsumerRef.Name != "worker" {
+		t.Fatalf("ConsumerRef = %#v; want worker", after.Status.ConsumerRef)
+	}
+	if after.Status.MachineRef == nil || after.Status.MachineRef.Name != "worker" {
+		t.Fatalf("legacy MachineRef = %#v; want worker", after.Status.MachineRef)
+	}
+}
+
+func TestReleaseHostTracksLastConsumerRef(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-host",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			ServerID: 12345,
+		},
+		Status: infrav1.HetznerRobotHostStatus{
+			State: infrav1.HostStateProvisioned,
+			ConsumerRef: &infrav1.MachineReference{
+				Name:      "worker",
+				Namespace: "caphr",
+			},
+			MachineRef: &infrav1.MachineReference{
+				Name:      "worker",
+				Namespace: "caphr",
+			},
+		},
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&infrav1.HetznerRobotHost{}).
+		WithObjects(host).
+		Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	if err := reconciler.releaseHost(ctx, "caphr", "worker-host"); err != nil {
+		t.Fatalf("releaseHost returned error: %v", err)
+	}
+
+	after := &infrav1.HetznerRobotHost{}
+	if err := client.Get(ctx, clientKey("caphr", "worker-host"), after); err != nil {
+		t.Fatalf("get host after release: %v", err)
+	}
+	if after.Status.State != infrav1.HostStateAvailable {
+		t.Fatalf("state = %q; want Available", after.Status.State)
+	}
+	if after.Status.ConsumerRef != nil || after.Status.MachineRef != nil {
+		t.Fatalf(
+			"consumer refs not cleared: consumerRef=%#v machineRef=%#v",
+			after.Status.ConsumerRef,
+			after.Status.MachineRef,
+		)
+	}
+	if after.Status.LastConsumerRef == nil || after.Status.LastConsumerRef.Name != "worker" {
+		t.Fatalf("LastConsumerRef = %#v; want worker", after.Status.LastConsumerRef)
+	}
+	if after.Status.DirtyReason != "ReleasedAfterMachineDelete" {
+		t.Fatalf("DirtyReason = %q; want ReleasedAfterMachineDelete", after.Status.DirtyReason)
 	}
 }
 

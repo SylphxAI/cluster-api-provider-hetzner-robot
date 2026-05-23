@@ -18,6 +18,30 @@ const (
 	HostStateProvisioned HostState = "Provisioned"
 )
 
+// HostLifecycleClass describes the operational role of a physical host.
+type HostLifecycleClass string
+
+const (
+	// HostLifecycleClassCompute is disposable worker capacity.
+	HostLifecycleClassCompute HostLifecycleClass = "compute"
+	// HostLifecycleClassControlPlane is an adopted or dedicated Kubernetes control-plane host.
+	HostLifecycleClassControlPlane HostLifecycleClass = "control-plane"
+	// HostLifecycleClassStorage is a Rook/Ceph storage host.
+	HostLifecycleClassStorage HostLifecycleClass = "storage"
+)
+
+// DestructiveProvisioningPolicy controls whether CAPHR may wipe or reset a host.
+type DestructiveProvisioningPolicy string
+
+const (
+	// DestructiveProvisioningPolicyAlwaysCleanSlate permits full disk wipe before provisioning.
+	DestructiveProvisioningPolicyAlwaysCleanSlate DestructiveProvisioningPolicy = "AlwaysCleanSlate"
+	// DestructiveProvisioningPolicyNeverDestructiveByDefault denies generic destructive provisioning.
+	DestructiveProvisioningPolicyNeverDestructiveByDefault DestructiveProvisioningPolicy = "NeverDestructiveByDefault"
+	// DestructiveProvisioningPolicyRequiresExternalRelease requires a separate storage lifecycle release.
+	DestructiveProvisioningPolicyRequiresExternalRelease DestructiveProvisioningPolicy = "RequiresExternalRelease"
+)
+
 // HetznerRobotHostSpec defines the desired state of a physical server.
 type HetznerRobotHostSpec struct {
 	// ServerID is the Hetzner Robot server ID.
@@ -53,6 +77,23 @@ type HetznerRobotHostSpec struct {
 	// +optional
 	// +kubebuilder:default="/dev/nvme0n1"
 	InstallDisk string `json:"installDisk,omitempty"`
+
+	// LifecycleClass declares the physical role of this host. Missing or unknown
+	// values fail closed for destructive provisioning.
+	// +optional
+	// +kubebuilder:validation:Enum=compute;control-plane;storage
+	LifecycleClass HostLifecycleClass `json:"lifecycleClass,omitempty"`
+
+	// MaintenanceMode prevents new claims and destructive provisioning for this host.
+	// Existing status ownership is left intact so an operator can inspect and repair.
+	// +optional
+	MaintenanceMode bool `json:"maintenanceMode,omitempty"`
+
+	// DestructiveProvisioningPolicy declares whether CAPHR may wipe or reset this host.
+	// Missing or unknown values fail closed.
+	// +optional
+	// +kubebuilder:validation:Enum=AlwaysCleanSlate;NeverDestructiveByDefault;RequiresExternalRelease
+	DestructiveProvisioningPolicy DestructiveProvisioningPolicy `json:"destructiveProvisioningPolicy,omitempty"`
 }
 
 // HetznerRobotHostStatus defines the observed state of a physical server.
@@ -61,14 +102,54 @@ type HetznerRobotHostStatus struct {
 	// +optional
 	State HostState `json:"state,omitempty"`
 
-	// MachineRef is a reference to the HetznerRobotMachine that has claimed this host.
-	// Nil when the host is Available.
+	// ConsumerRef is a reference to the HetznerRobotMachine that has claimed this host.
+	// Nil when the host is Available. This is the canonical ownership field.
+	// +optional
+	ConsumerRef *MachineReference `json:"consumerRef,omitempty"`
+
+	// MachineRef is the legacy alias for ConsumerRef, kept for compatibility with
+	// existing manifests, print columns, and external readers.
 	// +optional
 	MachineRef *MachineReference `json:"machineRef,omitempty"`
+
+	// HardwareDetails contains controller-discovered physical facts from rescue mode.
+	// +optional
+	HardwareDetails *HostHardwareDetails `json:"hardwareDetails,omitempty"`
+
+	// LastConsumerRef records the last HetznerRobotMachine that owned this host.
+	// +optional
+	LastConsumerRef *MachineReference `json:"lastConsumerRef,omitempty"`
+
+	// DirtyReason explains why an Available host may still need clean-slate provisioning.
+	// +optional
+	DirtyReason string `json:"dirtyReason,omitempty"`
 
 	// ErrorMessage contains a human-readable description of a terminal error.
 	// +optional
 	ErrorMessage string `json:"errorMessage,omitempty"`
+}
+
+// HostHardwareDetails captures hardware facts discovered in rescue mode.
+type HostHardwareDetails struct {
+	// PrimaryMAC is the MAC address of the primary NIC.
+	// +optional
+	PrimaryMAC string `json:"primaryMAC,omitempty"`
+
+	// GatewayIP is the detected default gateway for the public interface.
+	// +optional
+	GatewayIP string `json:"gatewayIP,omitempty"`
+
+	// NVMeDisks is the list of whole NVMe disk devices detected in rescue.
+	// +optional
+	NVMeDisks []string `json:"nvmeDisks,omitempty"`
+
+	// CephDisks is the subset of NVMeDisks with Ceph BlueStore signatures.
+	// +optional
+	CephDisks []string `json:"cephDisks,omitempty"`
+
+	// ByIDPaths maps detected disk devices to stable /dev/disk/by-id paths.
+	// +optional
+	ByIDPaths map[string]string `json:"byIDPaths,omitempty"`
 }
 
 // MachineReference is a reference to a HetznerRobotMachine.
@@ -85,7 +166,7 @@ type MachineReference struct {
 // +kubebuilder:printcolumn:name="ServerID",type="integer",JSONPath=".spec.serverID"
 // +kubebuilder:printcolumn:name="ServerIP",type="string",JSONPath=".spec.serverIP"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
-// +kubebuilder:printcolumn:name="Machine",type="string",JSONPath=".status.machineRef.name"
+// +kubebuilder:printcolumn:name="Consumer",type="string",JSONPath=".status.consumerRef.name"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // HetznerRobotHost represents a single physical server in the Hetzner Robot pool.

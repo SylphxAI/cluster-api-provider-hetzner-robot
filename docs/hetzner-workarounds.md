@@ -128,11 +128,16 @@ Additionally, Talos's EPHEMERAL partition (for kubelet data) defaults to consumi
 
 ### Solution
 
-**Disk selection**: Check for Ceph BlueStore signatures before install:
-```bash
-blkid /dev/nvme0n1* | grep ceph_bluestore
-```
-Refuse to install on disks with active Ceph data.
+**Destructive provisioning policy**: Check the `HetznerRobotHost` lifecycle
+class and policy before rescue reset or full-disk wipe. Missing policy fails
+closed. `compute` hosts may use `AlwaysCleanSlate`; `storage` hosts require a
+separate storage lifecycle release and are denied by generic provisioning until
+that release path exists.
+
+**Disk selection**: Detect Ceph BlueStore signatures during rescue hardware
+inspection and record them in `HetznerRobotHost.status.hardwareDetails`. The
+presence of Ceph signatures is operational evidence; it is not itself
+authorization to wipe.
 
 **Partition layout**: Use Talos v1.12+ VolumeConfig to limit EPHEMERAL and create OSD partitions:
 ```yaml
