@@ -157,5 +157,5 @@ Hardware facts that must modify the base document (MAC in deviceSelector, hostna
 | Config delivery | CAPHR | Bare metal has no metadata service; direct gRPC push required |
 | Existing host ownership adoption | CAPHR | Non-destructive `status.hostRef` / `status.consumerRef` backfill when HRM `providerID` exactly matches HRH `spec.serverID` |
 | Application config | CABPT/CACPPT templates | CNI, runtime, workload settings belong in TalosControlPlane spec |
-| Quorum and storage release | Platform/GitOps lifecycle | CAPHR exposes `lifecycleClass`, `maintenanceMode`, and ownership status; it does not decide etcd quorum or Ceph health |
+| Quorum and storage release | Platform/GitOps lifecycle | CAPHR consumes `HetznerRobotHostRelease` authorization after external backup/quorum/storage gates pass; it does not decide etcd quorum or Ceph health |
 | Day-2 config changes | CAPI in-place updates | Future: CAPI v1.12 RuntimeSDK extension (ADR-034) |

@@ -10,6 +10,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -525,7 +527,7 @@ func TestAuthorizeDestructiveProvisioning(t *testing.T) {
 			wantErr: "control-plane",
 		},
 		{
-			name: "storage host requires external release that is not implemented yet",
+			name: "storage host requires release-aware reconciler authorization",
 			host: infrav1.HetznerRobotHost{
 				ObjectMeta: metav1.ObjectMeta{Name: "storage-1"},
 				Spec: infrav1.HetznerRobotHostSpec{
@@ -533,7 +535,7 @@ func TestAuthorizeDestructiveProvisioning(t *testing.T) {
 					DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyRequiresExternalRelease,
 				},
 			},
-			wantErr: "external storage release",
+			wantErr: "active storage host release",
 		},
 	}
 
@@ -550,6 +552,160 @@ func TestAuthorizeDestructiveProvisioning(t *testing.T) {
 				t.Fatalf("authorizeDestructiveProvisioning error = %v; want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestAuthorizeDestructiveProvisioningWithStorageRelease(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-machine",
+			Namespace: "caphr",
+			UID:       types.UID("machine-uid"),
+		},
+	}
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-machine",
+			Namespace: "caphr",
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-1",
+			Namespace: "caphr",
+		},
+		Spec: infrav1.HetznerRobotHostSpec{
+			LifecycleClass:                infrav1.HostLifecycleClassStorage,
+			DestructiveProvisioningPolicy: infrav1.DestructiveProvisioningPolicyRequiresExternalRelease,
+		},
+	}
+
+	t.Run("storage host without release is denied", func(t *testing.T) {
+		client := fake.NewClientBuilder().WithScheme(scheme).Build()
+		reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+		err := reconciler.authorizeDestructiveProvisioning(ctx, hrm, machine, host)
+		if err == nil || !strings.Contains(err.Error(), "active HetznerRobotHostRelease") {
+			t.Fatalf("authorizeDestructiveProvisioning error = %v; want active release denial", err)
+		}
+	})
+
+	t.Run("expired storage release is denied", func(t *testing.T) {
+		release := storageReleaseFor(machine, host, time.Now().Add(-time.Minute))
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(release).Build()
+		reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+		err := reconciler.authorizeDestructiveProvisioning(ctx, hrm, machine, host)
+		if err == nil || !strings.Contains(err.Error(), "active HetznerRobotHostRelease") {
+			t.Fatalf("authorizeDestructiveProvisioning error = %v; want expired release denial", err)
+		}
+	})
+
+	t.Run("release bound to different machine UID is denied", func(t *testing.T) {
+		release := storageReleaseFor(machine, host, time.Now().Add(time.Hour))
+		release.Spec.MachineRef.UID = "other-uid"
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(release).Build()
+		reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+		err := reconciler.authorizeDestructiveProvisioning(ctx, hrm, machine, host)
+		if err == nil || !strings.Contains(err.Error(), "active HetznerRobotHostRelease") {
+			t.Fatalf("authorizeDestructiveProvisioning error = %v; want UID-bound release denial", err)
+		}
+	})
+
+	t.Run("active storage release permits destructive provisioning", func(t *testing.T) {
+		release := storageReleaseFor(machine, host, time.Now().Add(time.Hour))
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(release).Build()
+		reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+		if err := reconciler.authorizeDestructiveProvisioning(ctx, hrm, machine, host); err != nil {
+			t.Fatalf("authorizeDestructiveProvisioning returned error: %v", err)
+		}
+	})
+}
+
+func TestMapHostReleaseToMachines(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-machine",
+			Namespace: "caphr",
+			UID:       types.UID("machine-uid"),
+		},
+	}
+	host := &infrav1.HetznerRobotHost{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-1",
+			Namespace: "caphr",
+		},
+	}
+	release := storageReleaseFor(machine, host, time.Now().Add(time.Hour))
+	hrm := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hrm-storage-machine",
+			Namespace: "caphr",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: clusterv1.GroupVersion.String(),
+					Kind:       "Machine",
+					Name:       machine.Name,
+					UID:        machine.UID,
+				},
+			},
+		},
+	}
+	other := &infrav1.HetznerRobotMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-storage-machine",
+			Namespace: "caphr",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: clusterv1.GroupVersion.String(),
+					Kind:       "Machine",
+					Name:       "other-machine",
+					UID:        types.UID("other-uid"),
+				},
+			},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hrm, other).Build()
+	reconciler := &HetznerRobotMachineReconciler{Client: client, Scheme: scheme}
+
+	requests := reconciler.mapHostReleaseToMachines(ctx, release)
+	if len(requests) != 1 {
+		t.Fatalf("mapHostReleaseToMachines returned %d requests; want 1", len(requests))
+	}
+	if requests[0].NamespacedName != (types.NamespacedName{Namespace: "caphr", Name: "hrm-storage-machine"}) {
+		t.Fatalf("mapHostReleaseToMachines request = %v; want caphr/hrm-storage-machine", requests[0].NamespacedName)
+	}
+}
+
+func storageReleaseFor(machine *clusterv1.Machine, host *infrav1.HetznerRobotHost, expiresAt time.Time) *infrav1.HetznerRobotHostRelease {
+	return &infrav1.HetznerRobotHostRelease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "storage-release",
+			Namespace: host.Namespace,
+		},
+		Spec: infrav1.HetznerRobotHostReleaseSpec{
+			HostRef: corev1.LocalObjectReference{
+				Name: host.Name,
+			},
+			MachineRef: infrav1.ReleasedMachineReference{
+				Name:      machine.Name,
+				Namespace: machine.Namespace,
+				UID:       string(machine.UID),
+			},
+			ApprovedAction: infrav1.HostReleaseActionWipeAndReinstall,
+			ExpiresAt:      metav1.NewTime(expiresAt),
+			Reason:         "storage rollout test",
+		},
 	}
 }
 
