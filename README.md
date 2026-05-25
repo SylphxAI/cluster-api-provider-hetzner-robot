@@ -231,7 +231,14 @@ an explicit lifecycle class and compatible policy:
 | --- | --- | --- |
 | `compute` | `AlwaysCleanSlate` | CAPHR may wipe and reinstall. |
 | `control-plane` | `NeverDestructiveByDefault` | Generic wipe/reset is denied. |
-| `storage` | `RequiresExternalRelease` | Generic wipe/reset is denied until a storage lifecycle release controller exists. |
+| `storage` | `RequiresExternalRelease` | CAPHR may wipe only when an active `HetznerRobotHostRelease` is bound to the exact Host and CAPI Machine UID. |
+
+`HetznerRobotHostRelease` is intentionally narrow and expiring. It is not a
+Ceph health controller; an external infrastructure lifecycle gate must create it
+only after backup, quorum, and storage health checks pass. CAPHR consumes the
+release as authorization for one Host and one Machine UID, immediately
+reconciles the released machine when the release appears, then still applies the
+normal Host policy checks.
 
 `status.consumerRef` is the canonical Host ownership field. `status.machineRef`
 is kept only as a legacy compatibility alias.

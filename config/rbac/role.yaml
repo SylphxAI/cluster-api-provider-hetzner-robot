@@ -67,6 +67,14 @@ rules:
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
+  - hetznerrobothostreleases
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
   - hetznerrobotremediations
   verbs:
   - get

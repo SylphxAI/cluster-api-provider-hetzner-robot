@@ -130,9 +130,12 @@ Additionally, Talos's EPHEMERAL partition (for kubelet data) defaults to consumi
 
 **Destructive provisioning policy**: Check the `HetznerRobotHost` lifecycle
 class and policy before rescue reset or full-disk wipe. Missing policy fails
-closed. `compute` hosts may use `AlwaysCleanSlate`; `storage` hosts require a
-separate storage lifecycle release and are denied by generic provisioning until
-that release path exists.
+closed. `compute` hosts may use `AlwaysCleanSlate`; `storage` hosts require an
+active `HetznerRobotHostRelease` bound to the exact Host and CAPI Machine UID.
+The release is the CAPHR boundary object consumed from an external storage
+lifecycle gate; CAPHR watches it to reconcile the released machine without
+waiting for a polling interval, but does not embed Ceph or backup decision
+logic.
 
 **Disk selection**: Detect Ceph BlueStore signatures during rescue hardware
 inspection and record them in `HetznerRobotHost.status.hardwareDetails`. The

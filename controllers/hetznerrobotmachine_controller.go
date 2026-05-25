@@ -13,7 +13,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
@@ -46,6 +48,7 @@ type HetznerRobotMachineReconciler struct {
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=hetznerrobotmachines,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=hetznerrobotmachines/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=hetznerrobotmachines/finalizers,verbs=update
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=hetznerrobothostreleases,verbs=get;list;watch
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters;clusters/status;machines;machines/status,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -323,7 +326,7 @@ func (r *HetznerRobotMachineReconciler) reconcileNormal(
 	}
 
 	if provisioningMayBecomeDestructive(hrm.Status.ProvisioningState) {
-		if err := authorizeDestructiveProvisioning(hrh); err != nil {
+		if err := r.authorizeDestructiveProvisioning(ctx, hrm, machine, hrh); err != nil {
 			markDestructiveProvisioningDenied(hrm, err)
 			logger.Info("Destructive provisioning is blocked by host policy",
 				"host", hrh.Name,
@@ -449,7 +452,7 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 	// Skip if serverID could not be resolved (best-effort deletion).
 	if serverID != 0 {
 		if shouldReleaseHost && hrh != nil {
-			if err := authorizeDestructiveProvisioning(hrh); err != nil {
+			if err := r.authorizeDestructiveProvisioning(ctx, hrm, machine, hrh); err != nil {
 				logger.Info("Host policy blocks delete reset and release; leaving host claimed for manual/platform repair",
 					"host", hrh.Name,
 					"serverID", serverID,
@@ -487,5 +490,40 @@ func (r *HetznerRobotMachineReconciler) reconcileDelete(
 func (r *HetznerRobotMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1.HetznerRobotMachine{}).
+		Watches(&infrav1.HetznerRobotHostRelease{}, handler.EnqueueRequestsFromMapFunc(r.mapHostReleaseToMachines)).
 		Complete(r)
+}
+
+func (r *HetznerRobotMachineReconciler) mapHostReleaseToMachines(ctx context.Context, obj client.Object) []reconcile.Request {
+	release, ok := obj.(*infrav1.HetznerRobotHostRelease)
+	if !ok {
+		return nil
+	}
+
+	hrms := &infrav1.HetznerRobotMachineList{}
+	if err := r.List(ctx, hrms, client.InNamespace(release.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list HetznerRobotMachines for HostRelease", "hostRelease", release.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(hrms.Items))
+	for i := range hrms.Items {
+		hrm := &hrms.Items[i]
+		for _, ownerRef := range hrm.OwnerReferences {
+			if ownerRef.APIVersion != clusterv1.GroupVersion.String() || ownerRef.Kind != "Machine" {
+				continue
+			}
+			if ownerRef.Name != release.Spec.MachineRef.Name || string(ownerRef.UID) != release.Spec.MachineRef.UID {
+				continue
+			}
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: hrm.Namespace,
+					Name:      hrm.Name,
+				},
+			})
+			break
+		}
+	}
+	return requests
 }

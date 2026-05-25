@@ -1,0 +1,116 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: hetznerrobothostreleases.infrastructure.cluster.x-k8s.io
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: HetznerRobotHostRelease
+    listKind: HetznerRobotHostReleaseList
+    plural: hetznerrobothostreleases
+    shortNames:
+    - hrhr
+    singular: hetznerrobothostrelease
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.hostRef.name
+      name: Host
+      type: string
+    - jsonPath: .spec.machineRef.name
+      name: Machine
+      type: string
+    - jsonPath: .spec.approvedAction
+      name: Action
+      type: string
+    - jsonPath: .spec.expiresAt
+      name: Expires
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          HetznerRobotHostRelease authorizes CAPHR to perform one destructive action on
+          one physical host for one CAPI Machine UID. CAPHR does not decide Ceph or etcd
+          safety; an external infrastructure lifecycle gate must create this object only
+          after backup, quorum, and storage-health checks pass.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: HetznerRobotHostReleaseSpec defines a narrow, expiring release for a physical host.
+            properties:
+              approvedAction:
+                description: ApprovedAction is the destructive host action CAPHR may perform.
+                enum:
+                - WipeAndReinstall
+                type: string
+              expiresAt:
+                description: ExpiresAt is the deadline after which CAPHR must reject this release.
+                format: date-time
+                type: string
+              hostRef:
+                description: HostRef names the physical Host this release authorizes.
+                properties:
+                  name:
+                    default: ""
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              machineRef:
+                description: MachineRef binds this release to one CAPI Machine identity.
+                properties:
+                  name:
+                    description: Name is the CAPI Machine name.
+                    type: string
+                  namespace:
+                    description: Namespace is the CAPI Machine namespace.
+                    type: string
+                  uid:
+                    description: UID is the CAPI Machine UID. This prevents a stale release from matching a new Machine that reuses the same name.
+                    type: string
+                required:
+                - name
+                - namespace
+                - uid
+                type: object
+              reason:
+                description: Reason is the human-readable maintenance reason recorded by the lifecycle gate.
+                type: string
+            required:
+            - approvedAction
+            - expiresAt
+            - hostRef
+            - machineRef
+            type: object
+          status:
+            description: HetznerRobotHostReleaseStatus is reserved for lifecycle-gate observations.
+            properties:
+              authorized:
+                description: Authorized reports whether the lifecycle gate last observed this release as usable.
+                type: boolean
+              lastObservedTime:
+                description: LastObservedTime records when the lifecycle gate last evaluated this release.
+                format: date-time
+                type: string
+              reason:
+                description: Reason explains the latest lifecycle-gate observation.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

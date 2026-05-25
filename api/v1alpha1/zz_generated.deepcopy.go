@@ -423,6 +423,91 @@ func (in *HetznerRobotHostStatus) DeepCopy() *HetznerRobotHostStatus {
 	return out
 }
 
+func (in *HetznerRobotHostRelease) DeepCopyInto(out *HetznerRobotHostRelease) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+func (in *HetznerRobotHostRelease) DeepCopy() *HetznerRobotHostRelease {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostRelease)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHostRelease) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotHostReleaseList) DeepCopyInto(out *HetznerRobotHostReleaseList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]HetznerRobotHostRelease, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *HetznerRobotHostReleaseList) DeepCopy() *HetznerRobotHostReleaseList {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostReleaseList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHostReleaseList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+func (in *HetznerRobotHostReleaseSpec) DeepCopyInto(out *HetznerRobotHostReleaseSpec) {
+	*out = *in
+	out.HostRef = in.HostRef
+	out.ExpiresAt = in.ExpiresAt
+}
+
+func (in *HetznerRobotHostReleaseSpec) DeepCopy() *HetznerRobotHostReleaseSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostReleaseSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *HetznerRobotHostReleaseStatus) DeepCopyInto(out *HetznerRobotHostReleaseStatus) {
+	*out = *in
+	if in.LastObservedTime != nil {
+		in, out := &in.LastObservedTime, &out.LastObservedTime
+		*out = (*in).DeepCopy()
+	}
+}
+
+func (in *HetznerRobotHostReleaseStatus) DeepCopy() *HetznerRobotHostReleaseStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotHostReleaseStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *HostHardwareDetails) DeepCopyInto(out *HostHardwareDetails) {
 	*out = *in
 	if in.NVMeDisks != nil {
@@ -462,6 +547,19 @@ func (in *MachineReference) DeepCopy() *MachineReference {
 		return nil
 	}
 	out := new(MachineReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *ReleasedMachineReference) DeepCopyInto(out *ReleasedMachineReference) {
+	*out = *in
+}
+
+func (in *ReleasedMachineReference) DeepCopy() *ReleasedMachineReference {
+	if in == nil {
+		return nil
+	}
+	out := new(ReleasedMachineReference)
 	in.DeepCopyInto(out)
 	return out
 }
