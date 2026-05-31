@@ -43,6 +43,11 @@ const (
 )
 
 // HetznerRobotHostSpec defines the desired state of a physical server.
+// +kubebuilder:validation:XValidation:rule="self.serverID == oldSelf.serverID",message="serverID is immutable; create a new HetznerRobotHost for a different physical server"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.serverIP) || oldSelf.serverIP == '' || (has(self.serverIP) && self.serverIP == oldSelf.serverIP)",message="serverIP is immutable once populated"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.serverIPv6Net) || oldSelf.serverIPv6Net == '' || (has(self.serverIPv6Net) && self.serverIPv6Net == oldSelf.serverIPv6Net)",message="serverIPv6Net is immutable once populated"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.internalIP) || oldSelf.internalIP == '' || (has(self.internalIP) && self.internalIP == oldSelf.internalIP)",message="internalIP is immutable once populated"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.installDisk) || oldSelf.installDisk == '' || (has(self.installDisk) && self.installDisk == oldSelf.installDisk)",message="installDisk is immutable once populated"
 type HetznerRobotHostSpec struct {
 	// ServerID is the Hetzner Robot server ID.
 	// Find it in the Robot web console or via the Robot API.
