@@ -3,7 +3,7 @@
 
 # Image
 IMG ?= registry.sylphx.com/library/caphr:latest
-CONTROLLER_GEN_VERSION ?= v0.16.0
+CONTROLLER_GEN_VERSION ?= v0.20.1
 
 # Go
 GOBIN := $(shell go env GOPATH)/bin

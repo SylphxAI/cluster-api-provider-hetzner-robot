@@ -178,6 +178,18 @@ spec:
                   Example: v1.12.4
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: hostRef and hostSelector are mutually exclusive
+              rule: '!(has(self.hostRef) && has(self.hostSelector))'
+            - message: providerID is immutable once populated
+              rule: '!has(oldSelf.providerID) || size(oldSelf.providerID) == 0 ||
+                (has(self.providerID) && self.providerID == oldSelf.providerID)'
+            - message: hostRef is immutable once populated
+              rule: '!has(oldSelf.hostRef) || size(oldSelf.hostRef.name) == 0 || (has(self.hostRef)
+                && self.hostRef.name == oldSelf.hostRef.name)'
+            - message: hostSelector is immutable once populated
+              rule: '!has(oldSelf.hostSelector) || (has(self.hostSelector) && self.hostSelector
+                == oldSelf.hostSelector)'
           status:
             description: HetznerRobotMachineStatus defines the observed state of HetznerRobotMachine.
             properties:

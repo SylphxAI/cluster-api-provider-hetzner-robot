@@ -137,6 +137,15 @@ lifecycle gate; CAPHR watches it to reconcile the released machine without
 waiting for a polling interval, but does not embed Ceph or backup decision
 logic.
 
+**Admission immutability**: CRD CEL transition rules reject edits that would
+turn one Kubernetes object into a different physical server or infra binding.
+`HetznerRobotHost.spec.serverID` is immutable, and populated host networking /
+install-disk fields cannot be rewritten. `HetznerRobotMachine.spec.providerID`,
+`spec.hostRef`, and `spec.hostSelector` are immutable once populated, and
+`hostRef` / `hostSelector` remain mutually exclusive. This keeps the bare-metal
+Host-vs-Machine boundary enforced by the API server before the controller sees
+the object.
+
 **Disk selection**: Detect Ceph BlueStore signatures during rescue hardware
 inspection and record them in `HetznerRobotHost.status.hardwareDetails`. The
 presence of Ceph signatures is operational evidence; it is not itself
