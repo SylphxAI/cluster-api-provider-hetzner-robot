@@ -182,10 +182,10 @@ spec:
             - message: hostRef and hostSelector are mutually exclusive
               rule: '!(has(self.hostRef) && has(self.hostSelector))'
             - message: providerID is immutable once populated
-              rule: '!has(oldSelf.providerID) || oldSelf.providerID == '''' || (has(self.providerID)
-                && self.providerID == oldSelf.providerID)'
+              rule: '!has(oldSelf.providerID) || size(oldSelf.providerID) == 0 ||
+                (has(self.providerID) && self.providerID == oldSelf.providerID)'
             - message: hostRef is immutable once populated
-              rule: '!has(oldSelf.hostRef) || oldSelf.hostRef.name == '''' || (has(self.hostRef)
+              rule: '!has(oldSelf.hostRef) || size(oldSelf.hostRef.name) == 0 || (has(self.hostRef)
                 && self.hostRef.name == oldSelf.hostRef.name)'
             - message: hostSelector is immutable once populated
               rule: '!has(oldSelf.hostSelector) || (has(self.hostSelector) && self.hostSelector

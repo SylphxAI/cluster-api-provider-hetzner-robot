@@ -40,8 +40,8 @@ const (
 
 // HetznerRobotMachineSpec defines the desired state of HetznerRobotMachine.
 // +kubebuilder:validation:XValidation:rule="!(has(self.hostRef) && has(self.hostSelector))",message="hostRef and hostSelector are mutually exclusive"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.providerID) || oldSelf.providerID == '' || (has(self.providerID) && self.providerID == oldSelf.providerID)",message="providerID is immutable once populated"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.hostRef) || oldSelf.hostRef.name == '' || (has(self.hostRef) && self.hostRef.name == oldSelf.hostRef.name)",message="hostRef is immutable once populated"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.providerID) || size(oldSelf.providerID) == 0 || (has(self.providerID) && self.providerID == oldSelf.providerID)",message="providerID is immutable once populated"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.hostRef) || size(oldSelf.hostRef.name) == 0 || (has(self.hostRef) && self.hostRef.name == oldSelf.hostRef.name)",message="hostRef is immutable once populated"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.hostSelector) || (has(self.hostSelector) && self.hostSelector == oldSelf.hostSelector)",message="hostSelector is immutable once populated"
 type HetznerRobotMachineSpec struct {
 	// ProviderID is the unique identifier for this machine.

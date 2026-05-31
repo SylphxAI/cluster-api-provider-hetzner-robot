@@ -13,24 +13,42 @@ func TestHetznerRobotHostCRDHasPhysicalIdentityImmutability(t *testing.T) {
 	validations := crdSpecValidations(t, "infrastructure.cluster.x-k8s.io_hetznerrobothosts.yaml")
 
 	requireValidationRule(t, validations, "serverID is immutable", "self.serverID == oldSelf.serverID")
-	requireValidationRule(t, validations, "serverIP is immutable", "oldSelf.serverIP")
-	requireValidationRule(t, validations, "serverIPv6Net is immutable", "oldSelf.serverIPv6Net")
-	requireValidationRule(t, validations, "internalIP is immutable", "oldSelf.internalIP")
-	requireValidationRule(t, validations, "installDisk is immutable", "oldSelf.installDisk")
+	requireValidationRule(t, validations, "serverIP is immutable", "size(oldSelf.serverIP) == 0")
+	requireValidationRule(t, validations, "serverIPv6Net is immutable", "size(oldSelf.serverIPv6Net) == 0")
+	requireValidationRule(t, validations, "internalIP is immutable", "size(oldSelf.internalIP) == 0")
+	requireValidationRule(t, validations, "installDisk is immutable", "size(oldSelf.installDisk) == 0")
 }
 
 func TestHetznerRobotMachineCRDHasBindingImmutability(t *testing.T) {
 	validations := crdSpecValidations(t, "infrastructure.cluster.x-k8s.io_hetznerrobotmachines.yaml")
 
 	requireValidationRule(t, validations, "hostRef and hostSelector are mutually exclusive", "has(self.hostRef)")
-	requireValidationRule(t, validations, "providerID is immutable", "oldSelf.providerID")
-	requireValidationRule(t, validations, "hostRef is immutable", "oldSelf.hostRef")
+	requireValidationRule(t, validations, "providerID is immutable", "size(oldSelf.providerID) == 0")
+	requireValidationRule(t, validations, "hostRef is immutable", "size(oldSelf.hostRef.name) == 0")
+	requireValidationRule(t, validations, "hostSelector is immutable", "oldSelf.hostSelector")
+}
+
+func TestHetznerRobotMachineTemplateCRDHasBindingImmutability(t *testing.T) {
+	validations := crdTemplateSpecValidations(t, "infrastructure.cluster.x-k8s.io_hetznerrobotmachinetemplates.yaml")
+
+	requireValidationRule(t, validations, "hostRef and hostSelector are mutually exclusive", "has(self.hostRef)")
+	requireValidationRule(t, validations, "providerID is immutable", "size(oldSelf.providerID) == 0")
+	requireValidationRule(t, validations, "hostRef is immutable", "size(oldSelf.hostRef.name) == 0")
 	requireValidationRule(t, validations, "hostSelector is immutable", "oldSelf.hostSelector")
 }
 
 func crdSpecValidations(t *testing.T, fileName string) []map[string]any {
 	t.Helper()
+	return crdValidationsAtPath(t, fileName, "spec")
+}
 
+func crdTemplateSpecValidations(t *testing.T, fileName string) []map[string]any {
+	t.Helper()
+	return crdValidationsAtPath(t, fileName, "spec", "template", "spec")
+}
+
+func crdValidationsAtPath(t *testing.T, fileName string, schemaPath ...string) []map[string]any {
+	t.Helper()
 	data, err := os.ReadFile(filepath.Join("..", "..", "config", "crd", "bases", fileName))
 	if err != nil {
 		t.Fatalf("read CRD %s: %v", fileName, err)
@@ -49,9 +67,10 @@ func crdSpecValidations(t *testing.T, fileName string) []map[string]any {
 		"0",
 		"schema",
 		"openAPIV3Schema",
-		"properties",
-		"spec",
 	)
+	for _, segment := range schemaPath {
+		specSchema = nestedMap(t, specSchema, "properties", segment)
+	}
 	rawValidations, ok := specSchema["x-kubernetes-validations"].([]any)
 	if !ok || len(rawValidations) == 0 {
 		t.Fatalf("%s spec schema has no x-kubernetes-validations", fileName)

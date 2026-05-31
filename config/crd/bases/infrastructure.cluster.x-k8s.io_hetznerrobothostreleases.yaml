@@ -44,21 +44,35 @@ spec:
           after backup, quorum, and storage-health checks pass.
         properties:
           apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
           spec:
-            description: HetznerRobotHostReleaseSpec defines a narrow, expiring release for a physical host.
+            description: HetznerRobotHostReleaseSpec defines a narrow, expiring release
+              for a physical host.
             properties:
               approvedAction:
-                description: ApprovedAction is the destructive host action CAPHR may perform.
+                description: ApprovedAction is the destructive host action CAPHR may
+                  perform.
                 enum:
                 - WipeAndReinstall
                 type: string
               expiresAt:
-                description: ExpiresAt is the deadline after which CAPHR must reject this release.
+                description: ExpiresAt is the deadline after which CAPHR must reject
+                  this release.
                 format: date-time
                 type: string
               hostRef:
@@ -66,6 +80,12 @@ spec:
                 properties:
                   name:
                     default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
@@ -79,7 +99,9 @@ spec:
                     description: Namespace is the CAPI Machine namespace.
                     type: string
                   uid:
-                    description: UID is the CAPI Machine UID. This prevents a stale release from matching a new Machine that reuses the same name.
+                    description: |-
+                      UID is the CAPI Machine UID. This prevents a stale release from matching a
+                      new Machine that reuses the same name.
                     type: string
                 required:
                 - name
@@ -87,7 +109,8 @@ spec:
                 - uid
                 type: object
               reason:
-                description: Reason is the human-readable maintenance reason recorded by the lifecycle gate.
+                description: Reason is the human-readable maintenance reason recorded
+                  by the lifecycle gate.
                 type: string
             required:
             - approvedAction
@@ -96,13 +119,16 @@ spec:
             - machineRef
             type: object
           status:
-            description: HetznerRobotHostReleaseStatus is reserved for lifecycle-gate observations.
+            description: HetznerRobotHostReleaseStatus is reserved for lifecycle-gate
+              observations.
             properties:
               authorized:
-                description: Authorized reports whether the lifecycle gate last observed this release as usable.
+                description: Authorized reports whether the lifecycle gate last observed
+                  this release as usable.
                 type: boolean
               lastObservedTime:
-                description: LastObservedTime records when the lifecycle gate last evaluated this release.
+                description: LastObservedTime records when the lifecycle gate last
+                  evaluated this release.
                 format: date-time
                 type: string
               reason:
