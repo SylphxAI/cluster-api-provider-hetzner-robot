@@ -65,6 +65,7 @@ generate: controller-gen ## Generate CRD manifests and RBAC from Go types + kube
 	$(CONTROLLER_GEN) crd \
 		paths="./api/..." \
 		output:crd:artifacts:config=config/crd/bases
+	@./hack/inject-crd-contract-labels.sh
 	$(CONTROLLER_GEN) rbac:roleName=caphr-manager-role \
 		paths="./controllers/..." \
 		output:rbac:artifacts:config=config/rbac/generated

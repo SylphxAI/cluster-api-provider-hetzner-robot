@@ -4,6 +4,10 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
+  labels:
+    cluster.x-k8s.io/provider: infrastructure-hetzner-robot
+    cluster.x-k8s.io/v1beta1: v1alpha1
+    cluster.x-k8s.io/v1beta2: v1alpha1
   name: hetznerrobotclusters.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
@@ -177,8 +181,21 @@ spec:
                   - type
                   type: object
                 type: array
+              initialization:
+                description: |-
+                  Initialization tracks provisioning status for the CAPI v1beta2 contract.
+                  CAPI v1.12+ reads status.initialization.provisioned instead of status.ready.
+                properties:
+                  provisioned:
+                    description: |-
+                      Provisioned indicates the cluster infrastructure has been provisioned.
+                      CAPI v1beta2 reads this field (not status.ready) to determine ClusterInfrastructureReady.
+                    type: boolean
+                type: object
               ready:
-                description: Ready indicates the cluster infrastructure is ready.
+                description: |-
+                  Ready indicates the cluster infrastructure is ready.
+                  Used by CAPI v1beta1 contract. Kept for backward compat.
                 type: boolean
             type: object
         type: object
