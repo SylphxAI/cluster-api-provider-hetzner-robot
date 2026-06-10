@@ -83,8 +83,26 @@ func (in *HetznerRobotClusterSpec) DeepCopy() *HetznerRobotClusterSpec {
 	return out
 }
 
+func (in *HetznerRobotClusterInitialization) DeepCopyInto(out *HetznerRobotClusterInitialization) {
+	*out = *in
+}
+
+func (in *HetznerRobotClusterInitialization) DeepCopy() *HetznerRobotClusterInitialization {
+	if in == nil {
+		return nil
+	}
+	out := new(HetznerRobotClusterInitialization)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *HetznerRobotClusterStatus) DeepCopyInto(out *HetznerRobotClusterStatus) {
 	*out = *in
+	if in.Initialization != nil {
+		in, out := &in.Initialization, &out.Initialization
+		*out = new(HetznerRobotClusterInitialization)
+		**out = **in
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make(clusterv1.Conditions, len(*in))
@@ -186,8 +204,26 @@ func (in *HetznerRobotMachineSpec) DeepCopy() *HetznerRobotMachineSpec {
 	return out
 }
 
+func (in *InfrastructureMachineInitialization) DeepCopyInto(out *InfrastructureMachineInitialization) {
+	*out = *in
+}
+
+func (in *InfrastructureMachineInitialization) DeepCopy() *InfrastructureMachineInitialization {
+	if in == nil {
+		return nil
+	}
+	out := new(InfrastructureMachineInitialization)
+	in.DeepCopyInto(out)
+	return out
+}
+
 func (in *HetznerRobotMachineStatus) DeepCopyInto(out *HetznerRobotMachineStatus) {
 	*out = *in
+	if in.Initialization != nil {
+		in, out := &in.Initialization, &out.Initialization
+		*out = new(InfrastructureMachineInitialization)
+		**out = **in
+	}
 	if in.Addresses != nil {
 		in, out := &in.Addresses, &out.Addresses
 		*out = make([]clusterv1.MachineAddress, len(*in))

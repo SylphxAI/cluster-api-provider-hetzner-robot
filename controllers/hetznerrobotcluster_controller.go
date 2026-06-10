@@ -97,6 +97,7 @@ func (r *HetznerRobotClusterReconciler) reconcileNormal(
 	}
 
 	hrc.Status.Ready = true
+	hrc.Status.Initialization = &infrav1.HetznerRobotClusterInitialization{Provisioned: true}
 	conditions.MarkTrue(hrc, infrav1.ClusterReadyCondition)
 	return ctrl.Result{}, nil
 }

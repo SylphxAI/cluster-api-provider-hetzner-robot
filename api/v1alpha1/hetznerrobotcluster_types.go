@@ -67,11 +67,26 @@ type HetznerRobotClusterSpec struct {
 	// CAPHR no longer injects hostname.
 }
 
+// HetznerRobotClusterInitialization defines the initialization status.
+// Required by the CAPI v1beta2 infrastructure cluster contract.
+type HetznerRobotClusterInitialization struct {
+	// Provisioned indicates the cluster infrastructure has been provisioned.
+	// CAPI v1beta2 reads this field (not status.ready) to determine ClusterInfrastructureReady.
+	// +optional
+	Provisioned bool `json:"provisioned,omitempty"`
+}
+
 // HetznerRobotClusterStatus defines the observed state of HetznerRobotCluster.
 type HetznerRobotClusterStatus struct {
 	// Ready indicates the cluster infrastructure is ready.
+	// Used by CAPI v1beta1 contract. Kept for backward compat.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
+
+	// Initialization tracks provisioning status for the CAPI v1beta2 contract.
+	// CAPI v1.12+ reads status.initialization.provisioned instead of status.ready.
+	// +optional
+	Initialization *HetznerRobotClusterInitialization `json:"initialization,omitempty"`
 
 	// Conditions provides observations of the operational state of a HetznerRobotCluster.
 	// +optional
