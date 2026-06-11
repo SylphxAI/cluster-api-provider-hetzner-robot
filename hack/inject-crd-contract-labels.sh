@@ -2,7 +2,7 @@
 # Re-inject CAPI contract labels after controller-gen regenerates CRDs.
 # controller-gen does not emit metadata.labels; without these labels CAPI
 # (GetLatestContractAndAPIVersionFromContract) hard-errors and every CAPHR
-# CRD is dead on a cluster rebuilt from git. See platform ADR-216 §3/§6.
+# CRD is dead on a cluster rebuilt from git. See platform ADR-226 §3/§6.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
