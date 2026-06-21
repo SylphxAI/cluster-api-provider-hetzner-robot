@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "repo": "SylphxAI/cluster-api-provider-hetzner-robot",
+    "name": "CAPHR",
+    "lifecycle": "active",
+    "layer": "integration",
+    "summary": "Cluster API infrastructure provider for Hetzner Robot bare-metal servers running Talos Linux, including CRDs, controller logic, docs, examples, and image release workflow.",
+    "goals": [
+      "Provide the Go controller, APIs, CRDs, RBAC, examples, and container image for Hetzner Robot bare-metal Cluster API infrastructure.",
+      "Own the Talos-specific provisioning flow that discovers hardware facts, injects them into machine config, and applies config via Talos APIs.",
+      "Keep Host ownership, destructive provisioning policy, remediation, generated CRDs, tests, docs, and release artifacts coherent."
+    ],
+    "nonGoals": [
+      "Own generic Hetzner Cloud support, kubeadm/Ubuntu flows, cloud-init, application workloads, or product cluster policy outside the provider contract.",
+      "Own external storage safety decisions except through the narrow HetznerRobotHostRelease authorization surface documented in this repo.",
+      "Own enterprise doctrine or product-specific GitOps environment policy."
+    ]
+  },
+  "boundaries": {
+    "owns": [
+      {
+        "name": "caphr-provider-contract",
+        "description": "The Hetzner Robot Cluster API provider APIs, CRDs, RBAC, Go module, controller image, examples, and documented controller contract."
+      },
+      {
+        "name": "talos-bare-metal-provisioning",
+        "description": "The Talos-specific rescue, hardware fact discovery, config injection, host ownership, destructive provisioning authorization, remediation, and reconciliation behavior implemented by CAPHR."
+      }
+    ],
+    "doesNotOwn": [
+      "Generic Hetzner Cloud support, kubeadm/Ubuntu installimage flows, cloud-init, application workloads, or workload cluster product policy.",
+      "External storage safety, backup, quorum, or Ceph health decisions except through the documented HetznerRobotHostRelease authorization surface.",
+      "Enterprise engineering doctrine and manifest schema owned by SylphxAI/doctrine."
+    ],
+    "publicSurfaces": [
+      {
+        "type": "package-export",
+        "name": "Go module",
+        "location": "go.mod"
+      },
+      {
+        "type": "api",
+        "name": "CAPHR API types and CRDs",
+        "location": "api/v1alpha1/ and config/crd/bases/"
+      },
+      {
+        "type": "documentation",
+        "name": "README, architecture docs, comparison docs, and examples",
+        "location": "README.md, docs/, and examples/"
+      },
+      {
+        "type": "workflow",
+        "name": "CI and image release workflows",
+        "location": ".github/workflows/"
+      },
+      {
+        "type": "manifest",
+        "name": "Controller deployment and RBAC manifests",
+        "location": "config/manager/ and config/rbac/"
+      }
+    ],
+    "allowedDependencies": [
+      {
+        "repo": "SylphxAI/doctrine",
+        "surface": "project manifest schema and engineering doctrine",
+        "direction": "peer-public"
+      },
+      {
+        "repo": "kubernetes-sigs/cluster-api",
+        "surface": "Cluster API Go modules and controller-runtime contracts",
+        "direction": "external"
+      },
+      {
+        "repo": "siderolabs/talos",
+        "surface": "Talos machinery APIs and machine configuration contract",
+        "direction": "external"
+      }
+    ],
+    "forbiddenCouplings": [
+      "Do not add product-specific cluster topology, workload policy, backup policy, or GitOps environment assumptions to the provider core.",
+      "Do not bypass the documented Host ownership and destructive provisioning authorization model for convenience.",
+      "Do not fork doctrine standards into this repository."
+    ]
+  },
+  "documentation": {
+    "adr": {
+      "path": "docs/adr/",
+      "status": "planned"
+    },
+    "specs": {
+      "path": "docs/",
+      "status": "present"
+    },
+    "catalog": {
+      "path": ".doctrine/project.json",
+      "status": "present"
+    },
+    "runbooks": {
+      "path": "docs/hetzner-workarounds.md",
+      "status": "present"
+    },
+    "generatedReferences": {
+      "path": "config/crd/bases/",
+      "status": "present"
+    }
+  },
+  "delivery": {
+    "ciModel": "legacy-ci",
+    "requiredContexts": [],
+    "deployPath": "Pull requests and merge queue refs run Go CI with gofmt checks and go test ./...; main and tag pushes build and push the controller image to GHCR and tags create GitHub releases.",
+    "productionProof": "Passing CI, generated CRD/RBAC freshness, image digest or GHCR registry readback, and cluster reconciliation or smoke evidence for infrastructure-impacting changes.",
+    "recoveryClass": "forward-fix-only"
+  },
+  "adoption": {
+    "status": "baseline",
+    "gaps": [
+      {
+        "id": "required-contexts-not-recorded",
+        "description": "CI exists and supports merge_group, but branch-protection required contexts are not recorded in this manifest baseline.",
+        "owner": "SylphxAI/cluster-api-provider-hetzner-robot",
+        "target": "repo-local branch protection audit"
+      },
+      {
+        "id": "generated-crd-freshness-gate",
+        "description": "CRD/RBAC/generated-object freshness should be enforced before API or controller contract changes are promoted beyond baseline adoption.",
+        "owner": "SylphxAI/cluster-api-provider-hetzner-robot",
+        "target": "next API or CRD behavior change"
+      },
+      {
+        "id": "image-release-proof",
+        "description": "Main/tag image publication should record digest, registry readback, and rollback or forward-fix evidence before production lifecycle promotion.",
+        "owner": "SylphxAI/cluster-api-provider-hetzner-robot",
+        "target": "before production lifecycle promotion"
+      }
+    ]
+  }
+}
