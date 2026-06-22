@@ -5,6 +5,7 @@
     "name": "CAPHR",
     "lifecycle": "active",
     "layer": "integration",
+    "policyPool": "infrastructure",
     "summary": "Cluster API infrastructure provider for Hetzner Robot bare-metal servers running Talos Linux, including CRDs, controller logic, docs, examples, and image release workflow.",
     "goals": [
       "Provide the Go controller, APIs, CRDs, RBAC, examples, and container image for Hetzner Robot bare-metal Cluster API infrastructure.",
@@ -107,6 +108,7 @@
   },
   "delivery": {
     "ciModel": "legacy-ci",
+    "deployable": true,
     "requiredContexts": [],
     "deployPath": "Pull requests and merge queue refs run Go CI with gofmt checks and go test ./...; main and tag pushes build and push the controller image to GHCR and tags create GitHub releases.",
     "productionProof": "Passing CI, generated CRD/RBAC freshness, image digest or GHCR registry readback, and cluster reconciliation or smoke evidence for infrastructure-impacting changes.",
