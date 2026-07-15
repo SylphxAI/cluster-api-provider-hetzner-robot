@@ -1,22 +1,22 @@
-# Repository Agent Instructions
+# cluster-api-provider-hetzner-robot — local agent notes only
 
-This repository follows the central doctrine in
-[SylphxAI/doctrine](https://github.com/SylphxAI/doctrine).
+Doctrine and fleet delivery law live in the **host always-on constitution**
+(`~/.grok/AGENTS.md` / Doctrine template). This file must **not** restate,
+weaken, or fork that law (including PR-vs-direct-trunk delivery).
 
-Before changing behavior, read [PROJECT.md](./PROJECT.md) and
-[.doctrine/project.json](./.doctrine/project.json). Keep enterprise policy in
-doctrine; keep only repo-local CAPHR facts here.
+Local truth: `PROJECT.md`, `.doctrine/project.json` when present.
 
-Useful validation for provider changes:
+## Boundary hazards
 
-- `gofmt -w` on changed Go files, then confirm no gofmt drift
+- Never commit secrets, tokens, `.env` files, or credentials.
+
+## Local commands
+
 - `go test ./...`
-- CRD/RBAC/generated manifest freshness checks for API or controller contract
-  changes
-- Image digest or GHCR readback for release-impacting changes
+- Prefer the **narrowest** affected check before full workspace runs.
+- Report layers honestly: local diff · trunk FF · deploy · prod proof (do not collapse).
 
-Do not mutate shared infrastructure manually from this repo. Desired provider
-state, CRDs, RBAC, examples, image releases, and recovery notes must flow through
-Git and the documented delivery path. Do not add product-specific cluster
-topology, workload policy, backup policy, or GitOps environment assumptions to
-the provider core.
+## Validation notes
+
+- Prefer the **narrowest** affected check before full workspace runs.
+- Report layers honestly: local diff · trunk FF · deploy · prod proof (do not collapse).
