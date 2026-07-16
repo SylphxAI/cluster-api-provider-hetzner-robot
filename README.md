@@ -1,5 +1,10 @@
 # CAPHR — Cluster API Provider Hetzner Robot
 
+<p align="center">
+  <img src="docs/banner.png" alt="cluster-api-provider-hetzner-robot banner" width="100%" />
+</p>
+
+
 A [Cluster API](https://cluster-api.sigs.k8s.io/) infrastructure provider for **Hetzner Robot bare metal servers** running **Talos Linux**.
 
 ## Why Not CAPH?
