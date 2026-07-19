@@ -38,12 +38,12 @@ jobs:
             fi
           fi
 
-          files="$(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.go')"
-          if [ -z "$files" ]; then
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$base" HEAD -- '*.go')
+          if [ "${#files[@]}" -eq 0 ]; then
             exit 0
           fi
 
-          unformatted="$(gofmt -l $files)"
+          unformatted="$(gofmt -l "${files[@]}")"
           if [ -n "$unformatted" ]; then
             echo "$unformatted"
             exit 1
