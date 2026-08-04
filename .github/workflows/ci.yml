@@ -26,7 +26,7 @@ concurrency:
 jobs:
   test:
     # Dogfood Sylphx CI Compute. Do not use GitHub-hosted runners.
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     steps:
       - uses: actions/checkout@v4
         with:
