@@ -8,7 +8,6 @@ Linux.
 
 - State: `active`
 - Layer: `integration`
-- Machine manifest: [`.doctrine/project.json`](./.doctrine/project.json)
 
 ## Goals
 
