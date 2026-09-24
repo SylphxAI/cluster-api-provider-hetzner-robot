@@ -810,7 +810,7 @@ func TestInjectVLANConfig_PrefixLengthZero_DefaultsTo24(t *testing.T) {
 	input := []byte(`machine: {}`)
 	vlanCfg := &infrav1.VLANConfig{
 		ID:           4000,
-				PrefixLength: 0, // explicitly zero
+		PrefixLength: 0, // explicitly zero
 	}
 
 	result, err := injectVLANConfig(input, vlanCfg, "10.10.0.99", "aa:bb:cc:dd:ee:ff", "1.2.3.4", "1.2.3.1")

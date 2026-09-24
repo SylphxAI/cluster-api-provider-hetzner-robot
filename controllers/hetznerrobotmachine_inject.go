@@ -113,7 +113,7 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		}
 		newIface := map[string]interface{}{
 			"deviceSelector": selector,
-			"addresses": []interface{}{ipv6Addr},
+			"addresses":      []interface{}{ipv6Addr},
 			"routes": []interface{}{
 				map[string]interface{}{
 					"network": "::/0",
