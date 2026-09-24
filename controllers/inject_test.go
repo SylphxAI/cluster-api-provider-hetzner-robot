@@ -1035,3 +1035,22 @@ func TestModifyFirstDocument_InvalidYAML(t *testing.T) {
 		t.Fatal("expected error for invalid YAML, got nil")
 	}
 }
+
+func TestInjectIPv6Config_SelectsPrimaryNICByMAC(t *testing.T) {
+	input := []byte(`machine:
+  type: worker
+`)
+	result, err := injectIPv6Config(input, "2a01:4f8:2220:2f8a::", "9c:6b:00:72:50:36", "10.10.0.7")
+	if err != nil {
+		t.Fatalf("injectIPv6Config failed: %v", err)
+	}
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(result, &config); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	iface := config["machine"].(map[string]interface{})["network"].(map[string]interface{})["interfaces"].([]interface{})[0].(map[string]interface{})
+	sel := iface["deviceSelector"].(map[string]interface{})
+	if sel["hardwareAddr"] != "9c:6b:00:72:50:36" || sel["physical"] != true {
+		t.Errorf("IPv6 entry must select the primary NIC by MAC, got %v", sel)
+	}
+}

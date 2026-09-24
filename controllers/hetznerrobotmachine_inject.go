@@ -97,14 +97,22 @@ func injectIPv6Config(configData []byte, ipv6Net string, primaryMAC string, inte
 		ipv6Prefix := strings.Split(ipv6Net, "/")[0]
 		ipv6Addr := ipv6Prefix + "1/64"
 
-		// IPv6 goes in a SEPARATE interface entry (deviceSelector: physical only, no MAC).
-		// Must NOT merge into the DHCP+VLAN entry — combining dhcp:true with
-		// static addresses on the same interface causes Talos networking failures.
-		// This matches the proven working config on existing nodes.
+		// IPv6 goes in a SEPARATE interface entry. Must NOT merge into the
+		// DHCP entry — combining dhcp:true with static addresses on the same
+		// interface causes Talos networking failures.
+		//
+		// The entry selects the primary NIC by MAC. `physical: true` alone
+		// matches every physical port, and on dual-port servers Talos bound
+		// the ::/0 route to the unplugged second port (linkdown): host IPv6
+		// was dead on six production nodes until 2026-09-24.
+		selector := map[string]interface{}{
+			"physical": true,
+		}
+		if primaryMAC != "" {
+			selector["hardwareAddr"] = primaryMAC
+		}
 		newIface := map[string]interface{}{
-			"deviceSelector": map[string]interface{}{
-				"physical": true,
-			},
+			"deviceSelector": selector,
 			"addresses": []interface{}{ipv6Addr},
 			"routes": []interface{}{
 				map[string]interface{}{
