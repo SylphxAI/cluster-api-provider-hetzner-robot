@@ -1,7 +1,7 @@
 # CAPHR — Cluster API Provider Hetzner Robot
 
 <p align="center">
-  <img src="https://mark.sylphx.com/api/v1/banner?type=void&theme=tokyonight&text=cluster+api+provider+hetzner+robot&desc=Cluster+API+Infrastructure+Provider+for+Hetzner+Robot+bare+metal+%E2%80%94+Talos-native+&height=200&animation=rise&credit=0" alt="cluster-api-provider-hetzner-robot — Sylphx Mark banner" width="100%" />
+  <img src="https://mark.sylphx.com/api/v1/mark/hero?type=void&theme=tokyonight&text=cluster+api+provider+hetzner+robot&desc=Cluster+API+Infrastructure+Provider+for+Hetzner+Robot+bare+metal+%E2%80%94+Talos-native&height=200&animation=rise" alt="cluster-api-provider-hetzner-robot — Sylphx Mark banner" width="100%" />
 </p>
 
 A [Cluster API](https://cluster-api.sigs.k8s.io/) infrastructure provider for **Hetzner Robot bare metal servers** running **Talos Linux**.
