@@ -1,19 +1,14 @@
 name: CI
 
-# Fast Trunk (Agent-native):
-# - Aggregate source verdict: source-ci/pass
-# - CI = source correctness only; Platform builds production once
-# - Merge Queue off by default (no merge_group trigger)
-# - Concurrency cancels superseded PR/branch tip runs
+# Source checks: gofmt on changed files and `go test ./...`. The image is
+# built by build.yml on main. `ci-ok` is the one required status check.
 
+# A change is tested on its pull request and again in the merge queue (the
+# queue tests the merged result). Branch pushes without a pull request are not
+# tested; open a pull request.
 on:
   merge_group:
   pull_request:
-  push:
-    branches-ignore:
-      - main
-    tags-ignore:
-      - "v*"
 
 permissions:
   contents: read
@@ -25,8 +20,8 @@ concurrency:
 
 jobs:
   test:
-    # Dogfood Sylphx CI Compute. Do not use GitHub-hosted runners.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,3 +56,12 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  # The one required check: fails unless every job above succeeded.
+  ci-ok:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: test "${{ needs.test.result }}" = success
