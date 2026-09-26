@@ -8,7 +8,7 @@ jobs:
     # Dogfood Sylphx CI Compute. Repo-owned workflows must not use
     # GitHub-hosted runners because hosted minutes are not part of the Sylphx
     # delivery budget.
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     permissions:
       contents: write
       packages: write
