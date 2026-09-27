@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: sylphx-linux-standard
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
   ci-ok:
     if: always()
     needs: [test]
-    runs-on: sylphx-linux-standard
+    runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - run: test "${{ needs.test.result }}" = success

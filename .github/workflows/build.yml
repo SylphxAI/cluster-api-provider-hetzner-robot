@@ -5,10 +5,10 @@ on:
     tags: ["v*"]
 jobs:
   build:
-    # Dogfood Sylphx CI Compute. Repo-owned workflows must not use
-    # GitHub-hosted runners because hosted minutes are not part of the Sylphx
-    # delivery budget.
-    runs-on: sylphx-linux-standard
+    # GitHub's free standard hosted runner: this repository is public
+    # (owner#750, zero metered GitHub spend), so it costs nothing and keeps
+    # outside code off Sylphx hosts.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
