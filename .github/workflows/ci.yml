@@ -1,7 +1,8 @@
 name: CI
 
-# Source checks: gofmt on changed files and `go test ./...`. The image is
-# built by build.yml on main. `ci-ok` is the one required status check.
+# Merge-queue gate (docs/optimistic-merge.md): gofmt on changed files and a
+# build. `go test ./...` runs in verify.yml (ready pull requests and after merge).
+# The image is built by build.yml on main. `ci-ok` is the one required status check.
 
 # A change is tested on its pull request and again in the merge queue (the
 # queue tests the merged result). Branch pushes without a pull request are not
@@ -9,17 +10,33 @@ name: CI
 on:
   merge_group:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+  checks: read
+  pull-requests: read
 
 concurrency:
   # Fast Trunk: supersede obsolete runs for the same PR or branch tip.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
+  # Stop the line while the trunk's newest Verify run is red and its way back is in
+  # motion. Merge groups only; ships in observe mode.
+  main-state:
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: SylphxAI/.github/.github/actions/main-red-gate@05ac6474b96425bcb4965addd025a93e061b66c4
+        with:
+          mode: observe
+
+  lint:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -63,14 +80,24 @@ jobs:
             exit 1
           fi
 
-      - name: Test
-        run: go test ./...
+      - name: Build
+        run: |
+          go build ./...
+
+  # The full suite on a pull request that is ready; never in a merge group or a draft.
+  suite:
+    if: github.event_name != 'merge_group' && !github.event.pull_request.draft
+    uses: ./.github/workflows/verify.yml
 
   # The one required check: fails unless every job above succeeded.
   ci-ok:
     if: always()
-    needs: [test]
+    needs: [main-state, lint, suite]
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
-      - run: test "${{ needs.test.result }}" = success
+      - uses: SylphxAI/.github/.github/actions/needs-pass@05ac6474b96425bcb4965addd025a93e061b66c4
+        with:
+          needs: ${{ toJSON(needs) }}
+          required: lint
+          required-unless-merge-group: ${{ github.event.pull_request.draft && ' ' || 'suite' }}
