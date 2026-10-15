@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           filter: blob:none
-      - uses: SylphxAI/.github/.github/actions/stack-conformance@f488fc90cda8ee46a1c3baa3f5b608aea5004786 # SylphxAI/.github#220
+      - uses: SylphxAI/.github/.github/actions/stack-conformance@a7d2f765df5b91aad557962a70b6195985210464
         with:
           base: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
 
