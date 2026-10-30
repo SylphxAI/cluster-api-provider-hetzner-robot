@@ -16,3 +16,4 @@
 # stack-rule-adopted-v1 architecture/C7/failure-only-verdict
 # stack-rule-adopted-v1 architecture/C7/merge-only-completion
 # stack-rule-adopted-v1 model-pin
+# stack-rule-adopted-v1 architecture/C1/cache-economy
