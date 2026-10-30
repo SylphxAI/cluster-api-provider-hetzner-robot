@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: SylphxAI/.github/.github/actions/main-red-gate@05ac6474b96425bcb4965addd025a93e061b66c4
+      - uses: SylphxAI/.github/.github/actions/main-red-gate@083eff31aa012b3a24d5601abfc524ad461b2394 # main
         with:
           mode: observe
 
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           filter: blob:none
-      - uses: SylphxAI/.github/.github/actions/stack-conformance@a7d2f765df5b91aad557962a70b6195985210464
+      - uses: SylphxAI/.github/.github/actions/stack-conformance@083eff31aa012b3a24d5601abfc524ad461b2394 # main
         with:
           base: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
 
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: SylphxAI/.github/.github/actions/needs-pass@46ec433892bca8693193049b5ee7441bb916a7ad # main
+      - uses: SylphxAI/.github/.github/actions/needs-pass@083eff31aa012b3a24d5601abfc524ad461b2394 # main
         with:
           needs: ${{ toJSON(needs) }}
           required: lint

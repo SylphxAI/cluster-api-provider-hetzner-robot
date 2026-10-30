@@ -1,0 +1,18 @@
+# architecture-ratchet-v2
+# model-alias-ratchet-v1
+# stack-rule-adopted-v1 architecture/C1/privileged-branch
+# stack-rule-adopted-v1 architecture/C2/provider-bypass
+# stack-rule-adopted-v1 architecture/C3/bundled-method
+# stack-rule-adopted-v1 architecture/C3/downstream-config
+# stack-rule-adopted-v1 architecture/C3/downstream-import
+# stack-rule-adopted-v1 architecture/C4/competing-default
+# stack-rule-adopted-v1 architecture/C4/undeclared-setting
+# stack-rule-adopted-v1 architecture/C5/cron-progress
+# stack-rule-adopted-v1 architecture/C5/idle-floor
+# stack-rule-adopted-v1 architecture/C5/polling-loop
+# stack-rule-adopted-v1 architecture/C5/polling-timer
+# stack-rule-adopted-v1 architecture/C6/retired-route
+# stack-rule-adopted-v1 architecture/C6/unexplained-suppression
+# stack-rule-adopted-v1 architecture/C7/failure-only-verdict
+# stack-rule-adopted-v1 architecture/C7/merge-only-completion
+# stack-rule-adopted-v1 model-pin
